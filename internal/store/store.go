@@ -1,0 +1,108 @@
+// Package store holds ConsequenceOS state behind one interface. Stage 2 has
+// an in-memory implementation; Postgres arrives in stage 4.
+package store
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"sync"
+	"time"
+
+	"github.com/matutozi/consequence-os/internal/approval"
+	"github.com/matutozi/consequence-os/internal/audit"
+	"github.com/matutozi/consequence-os/pkg/verify"
+)
+
+// Store is everything the server persists. It grows as stages add receipts.
+type Store interface {
+	// AppendAudit saves an entry, assigning an ID if it has none, and returns it.
+	AppendAudit(ctx context.Context, e audit.Entry) (audit.Entry, error)
+	// ListAudit returns matching entries, newest first.
+	ListAudit(ctx context.Context, f audit.Filter) ([]audit.Entry, error)
+
+	// An interface can embed another: Store includes every approval method.
+	approval.Repository
+
+	// MarkReceiptUsed records a receipt as used, or returns
+	// verify.ErrAlreadyUsed. Atomic, so a receipt works exactly once.
+	MarkReceiptUsed(ctx context.Context, receiptID string, usedAt, expiresAt time.Time) error
+
+	// Close releases connections. The in-memory store has nothing to release.
+	Close()
+}
+
+// Memory is a Store that keeps everything in process memory. Data is lost on
+// restart. Safe for use from many goroutines at once.
+type Memory struct {
+	mu        sync.Mutex // guards the fields below; HTTP handlers run concurrently
+	audit     []audit.Entry
+	approvals []approval.Approval  // in creation order
+	receipts  map[string]time.Time // used receipt ID -> its expiry
+}
+
+// NewMemory returns an empty in-memory store.
+func NewMemory() *Memory {
+	return &Memory{receipts: map[string]time.Time{}}
+}
+
+// Close implements Store.
+func (m *Memory) Close() {}
+
+// MarkReceiptUsed implements Store.
+func (m *Memory) MarkReceiptUsed(_ context.Context, receiptID string, usedAt, expiresAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, used := m.receipts[receiptID]; used {
+		return verify.ErrAlreadyUsed
+	}
+	// Expired receipts fail verification anyway, so forget them now and then.
+	if len(m.receipts) > 10_000 {
+		for id, exp := range m.receipts {
+			if exp.Before(usedAt) {
+				delete(m.receipts, id)
+			}
+		}
+	}
+	m.receipts[receiptID] = expiresAt
+	return nil
+}
+
+// AppendAudit implements Store.
+func (m *Memory) AppendAudit(_ context.Context, e audit.Entry) (audit.Entry, error) {
+	if e.ID == "" {
+		id, err := newID("aud_")
+		if err != nil {
+			return audit.Entry{}, err
+		}
+		e.ID = id
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock() // defer runs when the function returns, so the lock is always released
+	m.audit = append(m.audit, e)
+	return e, nil
+}
+
+// ListAudit implements Store.
+func (m *Memory) ListAudit(_ context.Context, f audit.Filter) ([]audit.Entry, error) {
+	limit := f.EffectiveLimit()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var out []audit.Entry
+	for i := len(m.audit) - 1; i >= 0 && len(out) < limit; i-- { // walk backwards: newest first
+		if f.Matches(m.audit[i]) {
+			out = append(out, m.audit[i])
+		}
+	}
+	return out, nil
+}
+
+// newID returns prefix plus 16 random hex characters, e.g. "aud_3f9a0c...".
+func newID(prefix string) (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(b), nil
+}

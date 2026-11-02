@@ -1,0 +1,299 @@
+// Package approval holds risky tool calls until a human decides. An approval
+// is bound to one agent, one tool and one exact set of arguments (by hash),
+// and once approved it lets exactly one retry through within a time window.
+package approval
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/matutozi/consequence-os/internal/policy"
+)
+
+// Status is where an approval is in its life.
+type Status string
+
+const (
+	StatusPending  Status = "pending"
+	StatusApproved Status = "approved"
+	StatusRejected Status = "rejected"
+	StatusUsed     Status = "used" // approved, and the retry has gone through
+)
+
+// Errors returned by a Repository and the Service.
+var (
+	ErrNotFound   = errors.New("approval not found")
+	ErrNotPending = errors.New("approval has already been decided")
+	ErrNotUsable  = errors.New("approval is not approved, has expired, or was already used")
+	ErrBadToken   = errors.New("approver token is missing or wrong")
+	ErrNoApprover = errors.New("no approvers are configured for this owner")
+)
+
+// ApproverToken lets one named approver decide. Only a hash of the secret is kept.
+type ApproverToken struct {
+	Approver string   // e.g. ada@acme.example
+	Hash     [32]byte // sha256 of the secret in that approver's link
+}
+
+// Approval is one held call waiting for, or carrying, a human decision.
+type Approval struct {
+	ID         string          `json:"id"`
+	Tokens     []ApproverToken `json:"-"` // one per approver; the secrets themselves are never stored
+	AgentID    string          `json:"agent_id"`
+	OwnerID    string          `json:"owner_id"`
+	Tool       string          `json:"tool"`
+	ParamsHash string          `json:"params_hash"`
+	Summary    string          `json:"summary"`
+	Arguments  json.RawMessage `json:"-"` // canonical JSON, shown to the approver only, never logged
+	Level      policy.Level    `json:"level"`
+	Rule       string          `json:"rule"`
+	Status     Status          `json:"status"`
+	CreatedAt  time.Time       `json:"created_at"`
+	DecidedAt  time.Time       `json:"decided_at,omitempty"`
+	DecidedBy  string          `json:"decided_by,omitempty"`
+	ValidUntil time.Time       `json:"valid_until,omitempty"` // set when approved
+	UsedAt     time.Time       `json:"used_at,omitempty"`
+}
+
+// Expired reports whether an approved call's retry window has passed.
+func (a Approval) Expired(now time.Time) bool {
+	return a.Status == StatusApproved && !now.Before(a.ValidUntil)
+}
+
+// Repository stores approvals. Implementations must make DecideApproval and
+// UseApproval atomic, so two concurrent retries can't both use one approval.
+type Repository interface {
+	CreateApproval(ctx context.Context, a Approval) error
+	GetApproval(ctx context.Context, id string) (Approval, error)
+	// FindLatestApproval returns the newest approval for this agent, tool and
+	// arguments, or ErrNotFound.
+	FindLatestApproval(ctx context.Context, agentID, tool, paramsHash string) (Approval, error)
+	// DecideApproval moves a pending approval to approved or rejected, or
+	// returns ErrNotPending.
+	DecideApproval(ctx context.Context, id string, status Status, by string, at, validUntil time.Time) (Approval, error)
+	// UseApproval marks an approved, unexpired approval as used, or returns ErrNotUsable.
+	UseApproval(ctx context.Context, id string, at time.Time) (Approval, error)
+}
+
+// Request describes a held call.
+type Request struct {
+	AgentID    string
+	OwnerID    string
+	Tool       string
+	ParamsHash string
+	Summary    string
+	Arguments  json.RawMessage // canonical JSON
+	Level      policy.Level
+	Rule       string
+}
+
+// State is the answer to "may this held call go through now?".
+type State int
+
+const (
+	StatePending  State = iota // waiting for a human (iota numbers constants 0, 1, 2...)
+	StateApproved              // approved and now used up: forward the call
+	StateRejected              // a human said no
+)
+
+// Result is what Check decided, and the approval it was based on.
+type Result struct {
+	State    State
+	Approval Approval
+}
+
+// Options configures a Service.
+type Options struct {
+	Repo      Repository
+	Approvers map[string][]string // owner ID -> approver emails
+	Validity  time.Duration       // how long an approval stays usable after it's granted
+	PublicURL string              // base URL for links, e.g. http://localhost:8080
+	Notifier  Notifier            // delivers approver links; nil means LogNotifier
+	Log       *slog.Logger
+	Now       func() time.Time
+}
+
+// Service implements the approval rules on top of a Repository.
+type Service struct {
+	repo      Repository
+	approvers map[string][]string
+	validity  time.Duration
+	publicURL string
+	notifier  Notifier
+	log       *slog.Logger
+	now       func() time.Time
+}
+
+func NewService(opts Options) *Service {
+	s := &Service{
+		repo:      opts.Repo,
+		approvers: opts.Approvers,
+		validity:  opts.Validity,
+		publicURL: strings.TrimSuffix(opts.PublicURL, "/"),
+		notifier:  opts.Notifier,
+		log:       opts.Log,
+		now:       opts.Now,
+	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+	if s.notifier == nil {
+		s.notifier = LogNotifier{Log: opts.Log}
+	}
+	return s
+}
+
+// Validity returns how long an approval stays usable after it's granted.
+func (s *Service) Validity() time.Duration { return s.validity }
+
+// Check decides whether a held call may go through. It reuses a pending
+// approval for the same call, lets one retry through after approval, and
+// opens a new approval when there is none (or the last one expired or was used).
+func (s *Service) Check(ctx context.Context, req Request) (Result, error) {
+	now := s.now().UTC()
+	latest, err := s.repo.FindLatestApproval(ctx, req.AgentID, req.Tool, req.ParamsHash)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		// nothing yet: open a new approval below
+	case err != nil:
+		return Result{}, err
+	case latest.Status == StatusPending:
+		return Result{State: StatePending, Approval: latest}, nil
+	case latest.Status == StatusApproved && !latest.Expired(now):
+		used, err := s.repo.UseApproval(ctx, latest.ID, now)
+		if err == nil {
+			return Result{State: StateApproved, Approval: used}, nil
+		}
+		if !errors.Is(err, ErrNotUsable) {
+			return Result{}, err
+		}
+		// Another retry used it a moment ago: fall through and ask again.
+	case latest.Status == StatusRejected && now.Before(latest.DecidedAt.Add(s.validity)):
+		// A recent "no" stands, so the agent can't pester the approver.
+		return Result{State: StateRejected, Approval: latest}, nil
+	}
+	created, err := s.open(ctx, req, now)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{State: StatePending, Approval: created}, nil
+}
+
+func (s *Service) open(ctx context.Context, req Request, now time.Time) (Approval, error) {
+	approvers := s.approvers[req.OwnerID]
+	if len(approvers) == 0 {
+		return Approval{}, fmt.Errorf("%w: %s", ErrNoApprover, req.OwnerID)
+	}
+	id, err := randomString(8, hex.EncodeToString)
+	if err != nil {
+		return Approval{}, err
+	}
+	// Each approver gets their own secret, so a decision names who made it.
+	links := make(map[string]string, len(approvers))
+	tokens := make([]ApproverToken, 0, len(approvers))
+	for _, approver := range approvers {
+		token, err := randomString(32, base64.RawURLEncoding.EncodeToString)
+		if err != nil {
+			return Approval{}, err
+		}
+		tokens = append(tokens, ApproverToken{Approver: approver, Hash: sha256.Sum256([]byte(token))})
+		links[approver] = token
+	}
+	a := Approval{
+		ID:         "apr_" + id,
+		Tokens:     tokens,
+		AgentID:    req.AgentID,
+		OwnerID:    req.OwnerID,
+		Tool:       req.Tool,
+		ParamsHash: req.ParamsHash,
+		Summary:    req.Summary,
+		Arguments:  req.Arguments,
+		Level:      req.Level,
+		Rule:       req.Rule,
+		Status:     StatusPending,
+		CreatedAt:  now,
+	}
+	if err := s.repo.CreateApproval(ctx, a); err != nil {
+		return Approval{}, err
+	}
+	// Each link carries a secret: whoever has it can decide as that approver.
+	for _, approver := range approvers {
+		s.notifier.Notify(ctx, Notice{Approval: a, Approver: approver, Link: s.ApproverURL(a.ID, links[approver]), Validity: s.validity})
+	}
+	s.log.Info("approval requested", "approval_id", a.ID, "agent", a.AgentID, "tool", a.Tool,
+		"rule", a.Rule, "approvers", len(approvers))
+	return a, nil
+}
+
+// View returns an approval and, if token belongs to one of its approvers,
+// that approver's email. An empty approver means read-only.
+func (s *Service) View(ctx context.Context, id, token string) (Approval, string, error) {
+	a, err := s.repo.GetApproval(ctx, id)
+	if err != nil {
+		return Approval{}, "", err
+	}
+	return a, approverFor(a, token), nil
+}
+
+// Decide records the decision of the approver whose token this is.
+func (s *Service) Decide(ctx context.Context, id, token string, approve bool) (Approval, error) {
+	a, err := s.repo.GetApproval(ctx, id)
+	if err != nil {
+		return Approval{}, err
+	}
+	by := approverFor(a, token)
+	if by == "" {
+		return Approval{}, ErrBadToken
+	}
+	now := s.now().UTC()
+	if approve {
+		return s.repo.DecideApproval(ctx, id, StatusApproved, by, now, now.Add(s.validity))
+	}
+	return s.repo.DecideApproval(ctx, id, StatusRejected, by, now, time.Time{})
+}
+
+// Now returns the service's current time, so pages agree with Check about expiry.
+func (s *Service) Now() time.Time { return s.now().UTC() }
+
+// StatusURL is the read-only page the agent can share with its user.
+func (s *Service) StatusURL(id string) string {
+	return s.publicURL + "/approvals/" + id
+}
+
+// ApproverURL is the page with Approve and Reject buttons. It carries the secret.
+func (s *Service) ApproverURL(id, token string) string {
+	return s.StatusURL(id) + "?token=" + token
+}
+
+// approverFor returns the approver whose secret token is, or "".
+func approverFor(a Approval, token string) string {
+	if token == "" {
+		return ""
+	}
+	got := sha256.Sum256([]byte(token))
+	for _, t := range a.Tokens {
+		if subtle.ConstantTimeCompare(got[:], t.Hash[:]) == 1 {
+			return t.Approver
+		}
+	}
+	return ""
+}
+
+// randomString returns n random bytes encoded by encode.
+func randomString(n int, encode func([]byte) string) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("approval: random: %w", err)
+	}
+	return encode(b), nil
+}
