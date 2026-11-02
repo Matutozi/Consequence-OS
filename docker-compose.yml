@@ -1,0 +1,59 @@
+# Everything for the quickstart: ConsequenceOS with Postgres, the mock
+# payments server as the receiver, and Mailpit to catch approval emails.
+# Run `make env` once to create .env, then `docker compose up -d --build`.
+name: consequenceos
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: consequence
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run make env first}
+      POSTGRES_DB: consequence
+    volumes:
+      - pgdata:/var/lib/postgresql # Postgres 18 images keep data under this path
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "consequence", "-d", "consequence"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # A local inbox. Approval emails land here; read them at http://localhost:8025.
+  mailpit:
+    image: axllent/mailpit:v1.27.11
+    ports:
+      - "127.0.0.1:8025:8025"
+
+  consequenced:
+    build: .
+    image: consequenceos:dev
+    command: ["-config", "/etc/consequenceos/consequence.yaml"]
+    volumes:
+      - ./deploy/consequence.docker.yaml:/etc/consequenceos/consequence.yaml:ro
+    env_file: .env
+    environment:
+      CONSEQUENCE_DATABASE_URL: postgres://consequence:${POSTGRES_PASSWORD}@postgres:5432/consequence?sslmode=disable
+      CONSEQUENCE_SMTP_URL: smtp://mailpit:1025
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    restart: unless-stopped
+
+  # The receiver: refuses any tool call without a valid receipt.
+  mockmcp:
+    build: .
+    image: consequenceos:dev
+    entrypoint: ["/usr/local/bin/mockmcp"]
+    command: ["-addr", "0.0.0.0:9090", "-require-receipts", "-verify-url", "http://consequenced:8080"]
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      - consequenced
+    restart: unless-stopped
+
+volumes:
+  pgdata:

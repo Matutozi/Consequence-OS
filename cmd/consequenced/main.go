@@ -1,0 +1,280 @@
+// Command consequenced is the ConsequenceOS proxy server.
+//
+//	consequenced -config consequence.yaml            run the server
+//	consequenced -check                              validate config, print a summary, exit
+//	consequenced -tool payments.refund -args '{...}' show the policy decision for one call
+//	consequenced -genkeys                            print fresh receipt signing keys
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/matutozi/consequence-os/internal/approval"
+	"github.com/matutozi/consequence-os/internal/audit"
+	"github.com/matutozi/consequence-os/internal/config"
+	"github.com/matutozi/consequence-os/internal/policy"
+	"github.com/matutozi/consequence-os/internal/proxy"
+	"github.com/matutozi/consequence-os/internal/receipt"
+	"github.com/matutozi/consequence-os/internal/store"
+	"github.com/matutozi/consequence-os/pkg/verify"
+)
+
+func main() {
+	// The context is cancelled on Ctrl-C or SIGTERM, which triggers a clean shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Keeping the real work in run() makes it easy to return errors instead
+	// of calling os.Exit from deep inside the program.
+	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("consequenced", flag.ContinueOnError)
+	configPath := fs.String("config", "consequence.yaml", "path to the config file")
+	check := fs.Bool("check", false, "validate the config, print a summary and exit")
+	tool := fs.String("tool", "", "evaluate a call to this tool against the policy and exit")
+	toolArgs := fs.String("args", "{}", "JSON arguments for -tool")
+	genKeys := fs.Bool("genkeys", false, "print fresh receipt signing keys as env var lines and exit")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *genKeys {
+		return printKeys(out)
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	engine, err := policy.NewEngine(cfg.Rules, cfg.Tools)
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case *tool != "":
+		return explain(out, engine, *tool, *toolArgs)
+	case *check:
+		printSummary(out, cfg)
+		return nil
+	}
+	return serve(ctx, cfg, engine)
+}
+
+// serve runs the HTTP server until ctx is cancelled.
+func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error {
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	st, err := openStore(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
+	defer st.Close() // runs when serve returns, after the server has shut down
+
+	keys, err := receipt.LoadKeys(cfg.Receipts.Ed25519Key, cfg.Receipts.MLDSA87Key)
+	if err != nil {
+		return fmt.Errorf("%w (generate keys with: consequenced -genkeys)", err)
+	}
+	checker, err := receipt.NewChecker(keys, st, nil)
+	if err != nil {
+		return err
+	}
+
+	notifier, err := newNotifier(cfg, log)
+	if err != nil {
+		return err
+	}
+	approvals := approval.NewService(approval.Options{
+		Repo:      st,
+		Approvers: cfg.ApproversByOwner(),
+		Validity:  cfg.ApprovalValidity,
+		PublicURL: cfg.PublicURL,
+		Notifier:  notifier,
+		Log:       log,
+	})
+	px, err := proxy.New(proxy.Options{
+		Upstream:       cfg.Upstream,
+		Agents:         cfg.Agents,
+		AllowedOrigins: cfg.AllowedOrigins,
+		Engine:         engine,
+		Store:          st,
+		Approvals:      approvals,
+		Receipts:       receipt.NewIssuer(keys, cfg.PublicURL, cfg.Receipts.TTL, nil),
+		Log:            log,
+	})
+	if err != nil {
+		return err
+	}
+	pages := approval.NewHandlers(approvals, st, log)
+
+	// Go 1.22+ patterns can include a method and {wildcards}: "GET /approvals/{id}".
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", px) // all methods: POST, plus GET/DELETE passed through for legacy clients
+	mux.HandleFunc("GET /approvals/{id}", pages.Page)
+	mux.HandleFunc("POST /approvals/{id}/decide", pages.Decide)
+	mux.Handle("GET /v1/audit", audit.Handler(st, cfg.AdminToken, log))
+	mux.Handle("POST "+verify.VerifyPath, receipt.VerifyHandler(checker, log))
+	mux.Handle("GET "+verify.KeysPath, receipt.KeysHandler(keys))
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok\n")
+	})
+
+	srv := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// ListenAndServe blocks, so run it in a goroutine and wait for either a
+	// server error or a shutdown signal. A channel passes the result back.
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+	log.Info("consequenced listening", "mcp", "http://"+cfg.Listen+"/mcp", "upstream", cfg.Upstream,
+		"agents", len(cfg.Agents), "rules", len(cfg.Rules))
+
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+		log.Info("shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	}
+}
+
+// newNotifier emails approvers when email is configured; otherwise it logs
+// their links, which then makes the log a secret.
+func newNotifier(cfg *config.Config, log *slog.Logger) (approval.Notifier, error) {
+	if !cfg.Email.Enabled() {
+		log.Warn("no email configured: approver links will be written to this log; treat it as secret")
+		return approval.LogNotifier{Log: log}, nil
+	}
+	n, err := approval.NewEmailNotifier(cfg.Email.SMTPURL, cfg.Email.From, log)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("approval links will be emailed", "from", cfg.Email.From)
+	return n, nil
+}
+
+// openStore uses Postgres when a database URL is configured, otherwise memory.
+func openStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (store.Store, error) {
+	if cfg.DatabaseURL == "" {
+		log.Warn("no database_url_env set: using the in-memory store, which loses everything on restart")
+		return store.NewMemory(), nil
+	}
+	pg, err := store.OpenPostgres(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("using Postgres store; migrations are up to date")
+	return pg, nil
+}
+
+// printKeys prints fresh seeds in a form you can paste into a shell or .env file.
+func printKeys(out io.Writer) error {
+	ed, ml, err := receipt.GenerateSeeds()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "# Receipt signing keys. Keep these secret; anyone with them can issue receipts.\n")
+	fmt.Fprintf(out, "CONSEQUENCE_SIGNING_KEY_ED25519=%s\nCONSEQUENCE_SIGNING_KEY_MLDSA87=%s\n", ed, ml)
+	return nil
+}
+
+// explain prints the decision for one tool call, e.g. -tool payments.refund -args '{"amount":5000}'.
+func explain(out io.Writer, engine *policy.Engine, tool, rawArgs string) error {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
+		return fmt.Errorf("-args must be a JSON object: %w", err)
+	}
+	d := engine.Evaluate(tool, args)
+	fmt.Fprintf(out, "tool=%s level=%s action=%s rule=%s\n", tool, d.Level, d.Action, d.Rule)
+	return nil
+}
+
+func printSummary(out io.Writer, cfg *config.Config) {
+	storage := "in memory (lost on restart)"
+	if cfg.DatabaseURLEnv != "" {
+		storage = "Postgres, URL from $" + cfg.DatabaseURLEnv
+	}
+	fmt.Fprintf(out, "config OK\n  listen:            %s\n  public URL:        %s\n  upstream:          %s\n"+
+		"  approval validity: %s\n  receipt validity:  %s\n  admin token from:  $%s\n  storage:           %s\n",
+		cfg.Listen, cfg.PublicURL, cfg.Upstream, approval.HumanDuration(cfg.ApprovalValidity),
+		approval.HumanDuration(cfg.Receipts.TTL), cfg.AdminTokenEnv, storage)
+
+	email := "off (approver links go to the server log)"
+	if cfg.Email.Enabled() {
+		email = "from " + cfg.Email.From + ", SMTP URL from $" + cfg.Email.SMTPURLEnv
+	}
+	fmt.Fprintf(out, "  approval email:    %s\n", email)
+	fmt.Fprintf(out, "  owners (%d):\n", len(cfg.Owners))
+	for _, o := range cfg.Owners {
+		fmt.Fprintf(out, "    - %s, approvers: %s\n", o.ID, strings.Join(o.Approvers, ", "))
+	}
+
+	fmt.Fprintf(out, "  agents (%d):\n", len(cfg.Agents))
+	for _, a := range cfg.Agents {
+		fmt.Fprintf(out, "    - %s (owner %s, key from $%s)\n", a.ID, a.OwnerID, a.APIKeyEnv)
+	}
+
+	// Map iteration order is random in Go, so sort for stable output.
+	tools := make([]string, 0, len(cfg.Tools))
+	for name := range cfg.Tools {
+		tools = append(tools, name)
+	}
+	sort.Strings(tools)
+	fmt.Fprintf(out, "  tools (%d), unknown tools default to irreversible:\n", len(tools))
+	for _, name := range tools {
+		fmt.Fprintf(out, "    - %s: %s\n", name, cfg.Tools[name])
+	}
+
+	fmt.Fprintf(out, "  rules (%d), first match wins:\n", len(cfg.Rules))
+	for i, r := range cfg.Rules {
+		fmt.Fprintf(out, "    %d. %s: %s -> %s%s\n", i+1, r.Name, r.Tool, r.Action, describeWhen(r.When))
+	}
+}
+
+func describeWhen(conds policy.Conditions) string {
+	if len(conds) == 0 {
+		return ""
+	}
+	parts := make([]string, len(conds))
+	for i, c := range conds {
+		parts[i] = fmt.Sprintf("%s %s %s", c.Arg, c.Op, formatValue(c.Value))
+	}
+	return " when " + strings.Join(parts, " and ")
+}
+
+// formatValue prints lists with commas; %v would print [Coleman Cables Acme Steel].
+func formatValue(v any) string {
+	items, ok := v.([]any)
+	if !ok {
+		return fmt.Sprint(v)
+	}
+	parts := make([]string, len(items))
+	for i, item := range items {
+		parts[i] = fmt.Sprint(item)
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
