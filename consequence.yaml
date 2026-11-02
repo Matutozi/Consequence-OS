@@ -1,0 +1,67 @@
+# ConsequenceOS config. Secrets never go in this file: each agent names the
+# env var that holds its API key.
+
+listen: "127.0.0.1:8080"
+upstream: "http://127.0.0.1:9090/mcp"
+approval_validity: 10m
+
+# Token for owner endpoints such as GET /v1/audit.
+admin_token_env: CONSEQUENCE_ADMIN_TOKEN
+
+# Browser origins allowed to call /mcp. Agents aren't browsers, so none by default.
+allowed_origins: []
+
+# Receipts are signed with Ed25519 and ML-DSA-87. Generate the keys with
+# `consequenced -genkeys` and keep them in these env vars.
+receipts:
+  ttl: 5m
+  ed25519_key_env: CONSEQUENCE_SIGNING_KEY_ED25519
+  mldsa87_key_env: CONSEQUENCE_SIGNING_KEY_MLDSA87
+
+# Uncomment to keep approvals, receipts and the audit log in Postgres.
+# Without it everything lives in memory and is lost on restart.
+# database_url_env: CONSEQUENCE_DATABASE_URL
+
+# Who may approve held calls. Each approver gets their own approval link,
+# and receipts record which of them said yes.
+owners:
+  - id: acme
+    approvers: [ada@acme.example]
+
+agents:
+  - id: support-bot
+    owner_id: acme
+    api_key_env: CONSEQUENCE_KEY_SUPPORT_BOT
+
+# Consequence level per tool: read, reversible or irreversible.
+# Tools not listed here are treated as irreversible.
+tools:
+  notes.read: read
+  payments.refund: irreversible
+  odoo.purchase_order.confirm: irreversible
+
+# Evaluated top to bottom; the first match wins. With no match, read tools
+# are allowed and everything else asks a human.
+#
+# "when" takes one condition or a list; every condition in a list must hold.
+# Ops: eq, ne, gt, gte, lt, lte, and in / not_in with a list value.
+rules:
+  - name: small-po-trusted-supplier
+    tool: odoo.purchase_order.confirm
+    when:
+      - { arg: amount, op: lt, value: 500 }
+      - { arg: supplier, op: in, value: [Coleman Cables, Acme Steel] }
+    action: allow
+  - name: po-needs-manager
+    tool: odoo.purchase_order.confirm
+    action: ask
+  - name: small-refunds
+    tool: payments.refund
+    when: { arg: amount, op: lte, value: 50 }
+    action: allow
+  - name: big-refunds
+    tool: payments.refund
+    action: ask
+  - name: no-prod-deletes
+    tool: db.delete*
+    action: deny
