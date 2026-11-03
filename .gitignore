@@ -2,3 +2,9 @@
 *.test
 *.out
 .env
+
+# Python package (python/) build and test artefacts
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/

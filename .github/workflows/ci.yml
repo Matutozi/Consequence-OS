@@ -1,6 +1,7 @@
 # Runs on every push to main and every pull request: formatting, go vet,
-# all tests with the race detector (Postgres store tests included), and a
-# Docker build so the quickstart image can't break unnoticed.
+# all Go tests with the race detector (Postgres store tests included), the
+# Python middleware's tests, and a Docker build so the quickstart image
+# can't break unnoticed.
 name: CI
 
 on:
@@ -38,6 +39,26 @@ jobs:
         run: make lint
       - name: Tests (race detector on)
         run: go test -race -count=1 ./...
+
+  # The FastAPI/Starlette receiver middleware, on the oldest and newest
+  # supported Pythons.
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.14"]
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: pip install -e '.[test]'
+      - name: Tests
+        run: pytest
 
   docker:
     runs-on: ubuntu-latest

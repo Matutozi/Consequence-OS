@@ -3,3 +3,4 @@
 *.tar.gz
 *.test
 /bin/
+python/
