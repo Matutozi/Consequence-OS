@@ -37,7 +37,7 @@ func TestEvaluateMultipleConditions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := engine.Evaluate("purchase_order.confirm", tt.args); got.Rule != tt.wantRule {
+			if got := evaluate(t, engine, "purchase_order.confirm", tt.args); got.Rule != tt.wantRule {
 				t.Errorf("rule = %q, want %q", got.Rule, tt.wantRule)
 			}
 		})
@@ -154,7 +154,7 @@ func TestEngineCopiesRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	rules[0].When[0].Value = 1_000_000 // the caller changes its own copy afterwards
-	if got := engine.Evaluate("x", map[string]any{"amount": 500.0}); got.Action == ActionAllow {
+	if got := evaluate(t, engine, "x", map[string]any{"amount": 500.0}); got.Action == ActionAllow {
 		t.Error("engine was affected by a later change to the caller's rules")
 	}
 }

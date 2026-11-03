@@ -3,6 +3,7 @@
 //	consequenced -config consequence.yaml            run the server
 //	consequenced -check                              validate config, print a summary, exit
 //	consequenced -tool payments.refund -args '{...}' show the policy decision for one call
+//	             [-at 2026-11-02T22:00:00Z]          ...as if made at that time
 //	consequenced -genkeys                            print fresh receipt signing keys
 package main
 
@@ -51,6 +52,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	check := fs.Bool("check", false, "validate the config, print a summary and exit")
 	tool := fs.String("tool", "", "evaluate a call to this tool against the policy and exit")
 	toolArgs := fs.String("args", "{}", "JSON arguments for -tool")
+	at := fs.String("at", "", "for -tool: decide as if the call came at this RFC 3339 time (default now)")
 	genKeys := fs.Bool("genkeys", false, "print fresh receipt signing keys as env var lines and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -70,7 +72,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 
 	switch {
 	case *tool != "":
-		return explain(out, engine, *tool, *toolArgs)
+		return explain(out, engine, *tool, *toolArgs, *at)
 	case *check:
 		printSummary(out, cfg)
 		return nil
@@ -149,7 +151,7 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 	// server error or a shutdown signal. A channel passes the result back.
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	j := &janitor{approvals: approvals, store: st, log: log, now: time.Now}
+	j := &janitor{approvals: approvals, store: st, keepUsage: engine.LongestWindow(), log: log, now: time.Now}
 	go j.run(ctx) // stops when ctx is cancelled at shutdown
 	log.Info("consequenced listening", "mcp", "http://"+cfg.Listen+"/mcp", "upstream", cfg.Upstream,
 		"agents", len(cfg.Agents), "rules", len(cfg.Rules))
@@ -209,13 +211,28 @@ func printKeys(out io.Writer) error {
 }
 
 // explain prints the decision for one tool call, e.g. -tool payments.refund -args '{"amount":5000}'.
-func explain(out io.Writer, engine *policy.Engine, tool, rawArgs string) error {
+// There's no store here, so limit rules see an agent with no history.
+func explain(out io.Writer, engine *policy.Engine, tool, rawArgs, rawAt string) error {
 	var args map[string]any
 	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
 		return fmt.Errorf("-args must be a JSON object: %w", err)
 	}
-	d := engine.Evaluate(tool, args)
+	when := time.Now()
+	if rawAt != "" {
+		t, err := time.Parse(time.RFC3339, rawAt)
+		if err != nil {
+			return fmt.Errorf("-at must be an RFC 3339 time like 2026-11-02T22:00:00Z: %w", err)
+		}
+		when = t
+	}
+	d, err := engine.Decide(context.Background(), policy.Call{Tool: tool, Args: args, At: when}, policy.NoUsage{})
+	if err != nil {
+		return err
+	}
 	fmt.Fprintf(out, "tool=%s level=%s action=%s rule=%s\n", tool, d.Level, d.Action, d.Rule)
+	if engine.TracksUsage(tool) {
+		fmt.Fprintln(out, "note: limit rules were checked as if this agent had made no calls yet")
+	}
 	return nil
 }
 
@@ -265,8 +282,26 @@ func printSummary(out io.Writer, cfg *config.Config) {
 
 	fmt.Fprintf(out, "  rules (%d), first match wins:\n", len(cfg.Rules))
 	for i, r := range cfg.Rules {
-		fmt.Fprintf(out, "    %d. %s: %s -> %s%s\n", i+1, r.Name, r.Tool, r.Action, describeWhen(r.When))
+		fmt.Fprintf(out, "    %d. %s: %s -> %s%s%s\n", i+1, r.Name, r.Tool, r.Action, describeWhen(r.When), describeExtras(r))
 	}
+}
+
+// describeExtras prints a rule's schedule and limit, if any.
+func describeExtras(r policy.Rule) string {
+	var parts []string
+	if r.During != nil {
+		parts = append(parts, "during "+r.During.String())
+	}
+	if r.Outside != nil {
+		parts = append(parts, "outside "+r.Outside.String())
+	}
+	if r.Limit != nil {
+		parts = append(parts, "once "+r.Limit.String())
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return ", " + strings.Join(parts, ", ")
 }
 
 func describeWhen(conds policy.Conditions) string {

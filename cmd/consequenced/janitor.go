@@ -14,12 +14,14 @@ import (
 // blocks decisions straight away; the sweep only records it and tidies up.
 const sweepEvery = time.Minute
 
-// janitor expires approvals nobody decided on and forgets used receipts
-// that can no longer be replayed. Several servers may share one store:
-// each expired approval is returned to exactly one sweep, so it's audited once.
+// janitor expires approvals nobody decided on, forgets used receipts that
+// can no longer be replayed, and drops usage records older than any limit
+// window. Several servers may share one store: each expired approval is
+// returned to exactly one sweep, so it's audited once.
 type janitor struct {
 	approvals *approval.Service
 	store     store.Store
+	keepUsage time.Duration // the longest limit window; 0 when there are no limits
 	log       *slog.Logger
 	now       func() time.Time
 }
@@ -51,10 +53,19 @@ func (j *janitor) sweep(ctx context.Context) {
 		j.log.Info("approval expired", "approval_id", a.ID, "agent", a.AgentID, "tool", a.Tool)
 	}
 
-	n, err := j.store.PruneUsedReceipts(ctx, j.now().UTC())
+	now := j.now().UTC()
+	n, err := j.store.PruneUsedReceipts(ctx, now)
 	if err != nil {
 		j.log.Error("prune used receipts", "err", err)
 	} else if n > 0 {
 		j.log.Info("pruned used receipts", "count", n)
+	}
+
+	// With no limits, usage isn't recorded, so everything can go.
+	n, err = j.store.PruneUsage(ctx, now.Add(-j.keepUsage))
+	if err != nil {
+		j.log.Error("prune usage", "err", err)
+	} else if n > 0 {
+		j.log.Info("pruned usage records", "count", n)
 	}
 }

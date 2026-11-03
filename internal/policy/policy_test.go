@@ -53,7 +53,7 @@ func TestEvaluate(t *testing.T) {
 	for _, tt := range tests {
 		// t.Run gives each case its own name in test output.
 		t.Run(tt.name, func(t *testing.T) {
-			got := engine.Evaluate(tt.tool, tt.args)
+			got := evaluate(t, engine, tt.tool, tt.args)
 			if got.Action != tt.wantAction || got.Rule != tt.wantRule || got.Level != tt.wantLevel {
 				t.Errorf("Evaluate(%q) = %+v, want action=%s rule=%s level=%s",
 					tt.tool, got, tt.wantAction, tt.wantRule, tt.wantLevel)
@@ -71,7 +71,7 @@ func TestEvaluateFirstMatchWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
-	got := engine.Evaluate("payments.refund", nil)
+	got := evaluate(t, engine, "payments.refund", nil)
 	if got.Rule != "deny-all-payments" || got.Action != ActionDeny {
 		t.Errorf("got %+v, want the first rule to win", got)
 	}
