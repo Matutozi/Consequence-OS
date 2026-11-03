@@ -53,6 +53,7 @@ type Proxy struct {
 	agents    map[[32]byte]config.Agent // keyed by sha256 of the API key
 	origins   map[string]bool
 	rp        *httputil.ReverseProxy
+	limits    keyedLocks // serializes calls covered by limit rules; see locks.go
 }
 
 // New builds a Proxy.
@@ -148,7 +149,21 @@ func (p *Proxy) handleToolCall(w http.ResponseWriter, r *http.Request, agent con
 		writeJSON(w, http.StatusBadRequest, errorResponse(msg.id, codeInvalidParams, "arguments could not be hashed"))
 		return
 	}
-	decision := p.engine.Evaluate(call.name, call.args)
+	// With limit rules, this agent's calls to this tool go one at a time
+	// until the call is recorded, so parallel calls can't all fit under a limit.
+	release := func() {}
+	if p.engine.TracksUsage(call.name) {
+		release = p.limits.lock(agent.ID + "\x00" + call.name)
+	}
+	defer release()
+
+	pc := policy.Call{AgentID: agent.ID, Tool: call.name, Args: call.args, At: entry.Time}
+	decision, err := p.engine.Decide(r.Context(), pc, p.store)
+	if err != nil {
+		p.log.Error("policy decision failed", "tool", call.name, "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, "usage limits unavailable; call not forwarded"))
+		return
+	}
 	entry.Tool = call.name
 	entry.ParamsHash = hash
 	entry.Summary = summarize(call)
@@ -158,7 +173,7 @@ func (p *Proxy) handleToolCall(w http.ResponseWriter, r *http.Request, agent con
 
 	switch decision.Action {
 	case policy.ActionAllow:
-		p.forwardWithReceipt(w, r, msg, entry, "", body)
+		p.forwardWithReceipt(w, r, msg, pc, entry, "", body, release)
 
 	case policy.ActionDeny:
 		entry.Outcome = audit.OutcomeBlocked
@@ -167,13 +182,13 @@ func (p *Proxy) handleToolCall(w http.ResponseWriter, r *http.Request, agent con
 		writeJSON(w, http.StatusOK, toolErrorResult(msg.id, call.modern, text))
 
 	default: // ActionAsk
-		p.handleAsk(w, r, msg, call, entry, body)
+		p.handleAsk(w, r, msg, call, pc, entry, body, release)
 	}
 }
 
 // handleAsk holds a call until a human approves it, then lets one retry of
 // the exact same call (same agent, tool and argument hash) through.
-func (p *Proxy) handleAsk(w http.ResponseWriter, r *http.Request, msg message, call toolCall, entry audit.Entry, body []byte) {
+func (p *Proxy) handleAsk(w http.ResponseWriter, r *http.Request, msg message, call toolCall, pc policy.Call, entry audit.Entry, body []byte, release func()) {
 	args := call.rawArgs
 	if len(args) == 0 || string(args) == "null" {
 		args = json.RawMessage("{}")
@@ -197,7 +212,7 @@ func (p *Proxy) handleAsk(w http.ResponseWriter, r *http.Request, msg message, c
 
 	switch res.State {
 	case approval.StateApproved:
-		p.forwardWithReceipt(w, r, msg, entry, a.DecidedBy, body)
+		p.forwardWithReceipt(w, r, msg, pc, entry, a.DecidedBy, body, release)
 
 	case approval.StateRejected:
 		entry.Outcome = audit.OutcomeDeclined
@@ -224,8 +239,8 @@ func (p *Proxy) handleAsk(w http.ResponseWriter, r *http.Request, msg message, c
 // the audit entry, and forwards the call with the receipt attached in both
 // the X-Consequence-Receipt header and params._meta.consequenceReceipt.
 // Any failure stops the call: nothing is forwarded without a receipt and an
-// audit entry.
-func (p *Proxy) forwardWithReceipt(w http.ResponseWriter, r *http.Request, msg message, entry audit.Entry, approvedBy string, body []byte) {
+// audit entry. release frees the call's usage lock once usage is recorded.
+func (p *Proxy) forwardWithReceipt(w http.ResponseWriter, r *http.Request, msg message, pc policy.Call, entry audit.Entry, approvedBy string, body []byte, release func()) {
 	fail := func(what string) {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, what+"; call not forwarded"))
 	}
@@ -244,12 +259,22 @@ func (p *Proxy) forwardWithReceipt(w http.ResponseWriter, r *http.Request, msg m
 		fail("could not attach the receipt")
 		return
 	}
+	// Usage first: if the audit write then fails, a call is over-counted
+	// (the safe way round) rather than forwarded uncounted.
+	if p.engine.TracksUsage(entry.Tool) {
+		if err := p.store.RecordUsage(r.Context(), p.engine.UsageRecord(pc)); err != nil {
+			p.log.Error("usage write failed", "tool", entry.Tool, "err", err)
+			fail("usage log unavailable")
+			return
+		}
+	}
 	entry.Outcome = audit.OutcomeForwarded
 	entry.ReceiptID = rcpt.ReceiptID
 	if err := p.record(r.Context(), entry); err != nil {
 		fail("audit log unavailable")
 		return
 	}
+	release() // counted: the next call may be decided while this one runs upstream
 	// The reverse proxy reads the header value from the request context.
 	r = r.WithContext(context.WithValue(r.Context(), receiptKey{}, string(encoded)))
 	p.forward(w, r, withReceipt)

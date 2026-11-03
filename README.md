@@ -104,6 +104,43 @@ rules:
 - **Missing or wrong-type arguments:** if the argument is missing or the wrong type (for example the amount sent as the text `"10"`), the condition doesn't match and the next rule is checked.
 - **When nothing matches:** read tools are allowed and everything else asks.
 
+### Limits and time windows
+
+A rule can also match on how much an agent has already done, or on when the call arrives. Everything a rule sets must hold for it to match.
+
+```yaml
+rules:
+  # From an agent's 11th refund in 24 hours, ask a human.
+  - name: refund-burst
+    tool: payments.refund
+    limit: { max: 10, per: 24h }
+    action: ask
+
+  # Small refunds go through on their own, up to $500 a day per agent.
+  - name: small-refunds-daily-cap
+    tool: payments.refund
+    when: { arg: amount, op: lte, value: 50 }
+    limit: { sum: amount, max: 500, per: 24h }
+    action: ask
+
+  # Outside office hours, every refund asks.
+  - name: after-hours-refunds
+    tool: payments.refund
+    outside: { days: [mon, tue, wed, thu, fri], hours: "09:00-17:00", timezone: Africa/Lagos }
+    action: ask
+```
+
+- **`limit`** counts this agent's forwarded calls to the tool in a rolling window that ends now. It matches when this call would go over: the 11th call for `max: 10`, or a total past `max` with `sum`. Held, blocked and rejected calls don't count. Only the summed numbers are stored, never the other arguments.
+- **`during`** and **`outside`** take `days` (optional, `mon` to `sun`), `hours` (optional, like `09:00-17:00`; it can run past midnight, like `22:00-06:00`) and a required `timezone`. The start time is included and the end time isn't.
+- **Concurrency:** on one server, one agent's calls to one limited tool are decided one at a time, so parallel calls can't all slip under a limit. Several servers sharing a database can overshoot by a call or two when calls arrive at the same moment.
+- **Failures:** if usage can't be counted, the call isn't forwarded.
+
+To try a time window without waiting for it, pass `-at`. Limits count as if the agent had made no calls yet:
+
+```bash
+go run ./cmd/consequenced -tool payments.refund -args '{"amount":20}' -at 2026-11-02T22:00:00Z
+```
+
 To see what the policy would do with one call, without starting anything:
 
 ```bash
@@ -250,7 +287,8 @@ This is an early MVP. Built:
 - the proxy, policy engine, approvals with email, and dual-signed receipts;
 - the Go receiver middleware;
 - the Postgres store, the audit log, and Docker;
-- expiry for unanswered approvals, and a cleanup job for used receipts.
+- expiry for unanswered approvals, and a cleanup job for used receipts;
+- rate and spending limits, and time-window rules.
 
 Not yet:
 - FastAPI middleware for Python receivers (until then, Python services can call `POST /v1/receipts/verify`);

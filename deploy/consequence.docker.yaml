@@ -48,6 +48,13 @@ tools:
 #
 # "when" takes one condition or a list; every condition in a list must hold.
 # Ops: eq, ne, gt, gte, lt, lte, and in / not_in with a list value.
+#
+# A rule can also have:
+#   limit:   { max: 10, per: 24h }               matches from this agent's 11th call in 24h
+#   limit:   { sum: amount, max: 500, per: 24h } matches once the 24h total would pass 500
+#   during:  { days: [...], hours: "09:00-17:00", timezone: ... }  applies only in that window
+#   outside: { ... }                                                applies only outside it
+# Everything a rule sets must hold for it to match.
 rules:
   - name: small-po-trusted-supplier
     tool: purchase_order.confirm
@@ -58,10 +65,24 @@ rules:
   - name: po-needs-manager
     tool: purchase_order.confirm
     action: ask
+  # Small refunds go through on their own, but only up to $500 a day per
+  # agent; past that, even a small one needs a human.
+  - name: small-refunds-daily-cap
+    tool: payments.refund
+    when: { arg: amount, op: lte, value: 50 }
+    limit: { sum: amount, max: 500, per: 24h }
+    action: ask
   - name: small-refunds
     tool: payments.refund
     when: { arg: amount, op: lte, value: 50 }
     action: allow
+  # Rules can also apply only at certain times. For example, to ask a human
+  # about every refund outside office hours, put this above the refund rules:
+  #
+  # - name: after-hours-refunds
+  #   tool: payments.refund
+  #   outside: { days: [mon, tue, wed, thu, fri], hours: "09:00-17:00", timezone: Africa/Lagos }
+  #   action: ask
   - name: big-refunds
     tool: payments.refund
     action: ask

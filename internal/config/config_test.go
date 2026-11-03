@@ -196,3 +196,42 @@ func TestErrorsNeverContainSecrets(t *testing.T) {
 		t.Errorf("error leaks the API key: %v", err)
 	}
 }
+
+func TestParseLimitsAndSchedules(t *testing.T) {
+	ok := "upstream: http://x\n" + base + "owners: [{ id: o, approvers: [a@o.example] }]\n" +
+		"agents:\n  - { id: a, owner_id: o, api_key_env: K }\n"
+	env := baseEnv(map[string]string{"K": "k"})
+
+	cfg, err := Parse([]byte(ok+`rules:
+  - name: daily-cap
+    tool: payments.refund
+    limit: { sum: amount, max: 500, per: 24h }
+    outside: { days: [sat, sun], hours: "09:00-17:00", timezone: Africa/Lagos }
+    action: ask
+`), env)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	r := cfg.Rules[0]
+	if r.Limit == nil || r.Limit.Per != 24*time.Hour || r.Limit.Sum != "amount" || r.Limit.Max != 500 {
+		t.Errorf("limit = %+v", r.Limit)
+	}
+	if r.Outside == nil || r.Outside.Timezone != "Africa/Lagos" || len(r.Outside.Days) != 2 {
+		t.Errorf("outside = %+v", r.Outside)
+	}
+
+	bad := []struct{ name, rule, wantErr string }{
+		{"typo in limit", "limit: { maxx: 5, per: 1h }", "field maxx not found"},
+		{"typo in schedule", "during: { hour: \"09:00-17:00\", timezone: UTC }", "field hour not found"},
+		{"bad duration", "limit: { max: 5, per: soon }", "parse config"},
+		{"bad timezone", "during: { timezone: Nowhere/Land }", `rule 1 ("r"): during: unknown timezone`},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			yml := ok + "rules:\n  - { name: r, tool: x, action: ask, " + tt.rule + " }\n"
+			if _, err := Parse([]byte(yml), env); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("err = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}

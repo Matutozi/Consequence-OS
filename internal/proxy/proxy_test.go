@@ -91,19 +91,29 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
+// defaultRules is the policy most proxy tests run with.
+func defaultRules() []policy.Rule {
+	return []policy.Rule{
+		{Name: "small-refunds", Tool: "payments.refund", When: policy.Conditions{{Arg: "amount", Op: policy.OpLte, Value: 50}}, Action: policy.ActionAllow},
+		{Name: "big-refunds", Tool: "payments.refund", Action: policy.ActionAsk},
+		{Name: "no-prod-deletes", Tool: "db.delete*", Action: policy.ActionDeny},
+	}
+}
+
 // newFixture takes testing.TB, the interface both *testing.T and
 // *testing.B satisfy, so benchmarks can use it too.
 func newFixture(t testing.TB, st store.Store) fixture {
 	t.Helper() // failures point at the caller, not this line
+	return newFixtureWithRules(t, st, defaultRules())
+}
+
+func newFixtureWithRules(t testing.TB, st store.Store, rules []policy.Rule) fixture {
+	t.Helper()
 	up := &upstream{}
 	srv := httptest.NewServer(up)
 	t.Cleanup(srv.Close)
 
-	engine, err := policy.NewEngine([]policy.Rule{
-		{Name: "small-refunds", Tool: "payments.refund", When: policy.Conditions{{Arg: "amount", Op: policy.OpLte, Value: 50}}, Action: policy.ActionAllow},
-		{Name: "big-refunds", Tool: "payments.refund", Action: policy.ActionAsk},
-		{Name: "no-prod-deletes", Tool: "db.delete*", Action: policy.ActionDeny},
-	}, policy.Levels{"notes.read": policy.LevelRead, "payments.refund": policy.LevelIrreversible})
+	engine, err := policy.NewEngine(rules, policy.Levels{"notes.read": policy.LevelRead, "payments.refund": policy.LevelIrreversible})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/matutozi/consequence-os/internal/approval"
 	"github.com/matutozi/consequence-os/internal/audit"
+	"github.com/matutozi/consequence-os/internal/policy"
 	"github.com/matutozi/consequence-os/pkg/verify"
 )
 
@@ -31,6 +32,13 @@ type Store interface {
 	// expired receipt fails verification anyway. Returns how many it removed.
 	PruneUsedReceipts(ctx context.Context, now time.Time) (int64, error)
 
+	// Usage of forwarded calls, for limit rules. CountUsage comes from
+	// policy.UsageCounter; RecordUsage saves one call; PruneUsage forgets
+	// calls older than before.
+	policy.UsageCounter
+	RecordUsage(ctx context.Context, u policy.UsageRecord) error
+	PruneUsage(ctx context.Context, before time.Time) (int64, error)
+
 	// Close releases connections. The in-memory store has nothing to release.
 	Close()
 }
@@ -42,6 +50,7 @@ type Memory struct {
 	audit     []audit.Entry
 	approvals []approval.Approval  // in creation order
 	receipts  map[string]time.Time // used receipt ID -> its expiry
+	usage     []policy.UsageRecord
 }
 
 // NewMemory returns an empty in-memory store.

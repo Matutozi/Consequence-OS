@@ -1,7 +1,11 @@
 // Package policy decides whether a tool call is allowed, needs a human, or is denied.
 package policy
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"time"
+)
 
 // Action is what a rule tells the proxy to do with a call.
 type Action string
@@ -15,13 +19,24 @@ const (
 // DefaultRule is the rule name reported when no configured rule matched.
 const DefaultRule = "default"
 
-// Rule matches tool calls by tool name (glob allowed) and optional
-// argument conditions, all of which must hold.
+// Rule matches tool calls by tool name (glob allowed). Everything else it
+// sets must hold too: the argument conditions, the time window, and the limit.
 type Rule struct {
-	Name   string     `yaml:"name"`
-	Tool   string     `yaml:"tool"`
-	When   Conditions `yaml:"when,omitempty"` // nil means "no conditions"
-	Action Action     `yaml:"action"`
+	Name    string     `yaml:"name"`
+	Tool    string     `yaml:"tool"`
+	When    Conditions `yaml:"when,omitempty"`    // nil means "no conditions"
+	During  *Schedule  `yaml:"during,omitempty"`  // only inside this window
+	Outside *Schedule  `yaml:"outside,omitempty"` // only outside this window
+	Limit   *Limit     `yaml:"limit,omitempty"`   // only once this call would pass the limit
+	Action  Action     `yaml:"action"`
+}
+
+// Call is one tool call to decide on.
+type Call struct {
+	AgentID string
+	Tool    string
+	Args    map[string]any
+	At      time.Time // when the call arrived; schedules and limits use it
 }
 
 // Decision is the outcome of evaluating one tool call.
@@ -42,25 +57,23 @@ func NewEngine(rules []Rule, levels Levels) (*Engine, error) {
 	if err := levels.Validate(); err != nil {
 		return nil, err
 	}
+	e := &Engine{
+		rules:  make([]Rule, len(rules)),
+		levels: make(Levels, len(levels)),
+	}
 	seen := make(map[string]bool, len(rules))
 	for i, r := range rules {
-		if err := validateRule(r); err != nil {
+		// Work on a copy so later changes to the caller's rules can't affect
+		// us. Copying a struct copies only pointers and slice headers, so
+		// copy what they point at too.
+		r = copyRule(r)
+		if err := validateRule(&r); err != nil {
 			return nil, fmt.Errorf("rule %d (%q): %w", i+1, r.Name, err)
 		}
 		if seen[r.Name] {
 			return nil, fmt.Errorf("rule %d: duplicate name %q", i+1, r.Name)
 		}
 		seen[r.Name] = true
-	}
-
-	// Copy so later changes to the caller's slices or map can't affect us.
-	// Copying a struct copies only the slice header, so When is copied too.
-	e := &Engine{
-		rules:  make([]Rule, len(rules)),
-		levels: make(Levels, len(levels)),
-	}
-	for i, r := range rules {
-		r.When = append(Conditions(nil), r.When...)
 		e.rules[i] = r
 	}
 	for tool, level := range levels {
@@ -69,7 +82,25 @@ func NewEngine(rules []Rule, levels Levels) (*Engine, error) {
 	return e, nil
 }
 
-func validateRule(r Rule) error {
+func copyRule(r Rule) Rule {
+	r.When = append(Conditions(nil), r.When...)
+	if r.During != nil {
+		d := *r.During
+		r.During = &d
+	}
+	if r.Outside != nil {
+		o := *r.Outside
+		r.Outside = &o
+	}
+	if r.Limit != nil {
+		l := *r.Limit
+		r.Limit = &l
+	}
+	return r
+}
+
+// validateRule checks a rule and compiles its schedules.
+func validateRule(r *Rule) error {
 	if r.Name == "" {
 		return fmt.Errorf("name is required")
 	}
@@ -87,22 +118,109 @@ func validateRule(r Rule) error {
 	default:
 		return fmt.Errorf("unknown action %q (want allow, ask or deny)", r.Action)
 	}
+	if r.During != nil && r.Outside != nil {
+		return fmt.Errorf("use during or outside, not both")
+	}
+	for name, s := range map[string]*Schedule{"during": r.During, "outside": r.Outside} {
+		if s != nil {
+			if err := s.compile(); err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+		}
+	}
+	if r.Limit != nil {
+		if err := r.Limit.validate(); err != nil {
+			return err
+		}
+	}
 	return r.When.validate()
 }
 
-// Evaluate decides what to do with a call to tool with the given arguments.
-func (e *Engine) Evaluate(tool string, args map[string]any) Decision {
-	level := e.levels.For(tool)
-	for _, r := range e.rules {
-		if !matchTool(r.Tool, tool) {
-			continue
+// Decide picks the action for a call. usage answers limit rules and may be
+// nil when no rule has a limit. An error means usage couldn't be counted;
+// the caller must not forward the call.
+func (e *Engine) Decide(ctx context.Context, c Call, usage UsageCounter) (Decision, error) {
+	level := e.levels.For(c.Tool)
+	for i := range e.rules {
+		matched, err := e.rules[i].matches(ctx, c, usage)
+		if err != nil {
+			return Decision{}, fmt.Errorf("rule %q: %w", e.rules[i].Name, err)
 		}
-		if !r.When.matches(args) {
-			continue
+		if matched {
+			return Decision{Action: e.rules[i].Action, Rule: e.rules[i].Name, Level: level}, nil
 		}
-		return Decision{Action: r.Action, Rule: r.Name, Level: level}
 	}
-	return Decision{Action: defaultAction(level), Rule: DefaultRule, Level: level}
+	return Decision{Action: defaultAction(level), Rule: DefaultRule, Level: level}, nil
+}
+
+// matches checks the cheap parts first, so usage is only counted when the
+// tool, time and arguments already fit.
+func (r *Rule) matches(ctx context.Context, c Call, usage UsageCounter) (bool, error) {
+	switch {
+	case !matchTool(r.Tool, c.Tool):
+		return false, nil
+	case r.During != nil && !r.During.contains(c.At):
+		return false, nil
+	case r.Outside != nil && r.Outside.contains(c.At):
+		return false, nil
+	case !r.When.matches(c.Args):
+		return false, nil
+	case r.Limit == nil:
+		return true, nil
+	}
+	return r.Limit.exceeded(ctx, c, usage)
+}
+
+// TracksUsage reports whether any limit rule covers tool, so its forwarded
+// calls need recording.
+func (e *Engine) TracksUsage(tool string) bool {
+	for _, r := range e.rules {
+		if r.Limit != nil && matchTool(r.Tool, tool) {
+			return true
+		}
+	}
+	return false
+}
+
+// SummedArgs lists the arguments that limit rules for tool add up, so
+// their values can be recorded with each forwarded call.
+func (e *Engine) SummedArgs(tool string) []string {
+	var args []string
+	seen := map[string]bool{}
+	for _, r := range e.rules {
+		if r.Limit != nil && r.Limit.Sum != "" && !seen[r.Limit.Sum] && matchTool(r.Tool, tool) {
+			seen[r.Limit.Sum] = true
+			args = append(args, r.Limit.Sum)
+		}
+	}
+	return args
+}
+
+// UsageRecord describes a forwarded call for the usage log, keeping only
+// the numeric arguments that limit rules add up.
+func (e *Engine) UsageRecord(c Call) UsageRecord {
+	u := UsageRecord{AgentID: c.AgentID, Tool: c.Tool, At: c.At}
+	for _, arg := range e.SummedArgs(c.Tool) {
+		if v, ok := toNumber(c.Args[arg]); ok {
+			if u.Values == nil {
+				u.Values = map[string]float64{}
+			}
+			u.Values[arg] = v
+		}
+	}
+	return u
+}
+
+// LongestWindow is the longest limit window, i.e. how long usage records
+// must be kept. Zero when no rule has a limit.
+func (e *Engine) LongestWindow() time.Duration {
+	var longest time.Duration
+	for _, r := range e.rules {
+		if r.Limit != nil && r.Limit.Per > longest {
+			longest = r.Limit.Per
+		}
+	}
+	return longest
 }
 
 // LevelFor returns the configured level of a tool.

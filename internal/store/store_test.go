@@ -368,6 +368,53 @@ func TestPruneUsedReceipts(t *testing.T) {
 	})
 }
 
+func TestUsage(t *testing.T) {
+	forEachStore(t, func(t *testing.T, st Store) {
+		ctx := context.Background()
+		records := []policy.UsageRecord{
+			{AgentID: "bot", Tool: "payments.refund", At: at.Add(-25 * time.Hour), Values: map[string]float64{"amount": 1000}}, // outside a 24h window
+			{AgentID: "bot", Tool: "payments.refund", At: at.Add(-2 * time.Hour), Values: map[string]float64{"amount": 120.5}},
+			{AgentID: "bot", Tool: "payments.refund", At: at.Add(-time.Hour), Values: map[string]float64{"amount": 30}},
+			{AgentID: "bot", Tool: "payments.refund", At: at},                                              // no summed values
+			{AgentID: "other", Tool: "payments.refund", At: at, Values: map[string]float64{"amount": 999}}, // another agent
+			{AgentID: "bot", Tool: "payments.charge", At: at, Values: map[string]float64{"amount": 999}},   // another tool
+		}
+		for _, r := range records {
+			if err := st.RecordUsage(ctx, r); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		tests := []struct {
+			name      string
+			since     time.Time
+			sumArg    string
+			wantCount int
+			wantSum   float64
+		}{
+			{"last 24 hours", at.Add(-24 * time.Hour), "amount", 3, 150.5},
+			{"count only", at.Add(-24 * time.Hour), "", 3, 0},
+			{"since itself is left out", at.Add(-time.Hour), "amount", 1, 0},
+			{"argument never recorded", at.Add(-24 * time.Hour), "fee", 3, 0},
+			{"everything", at.Add(-48 * time.Hour), "amount", 4, 1150.5},
+		}
+		for _, tt := range tests {
+			count, sum, err := st.CountUsage(ctx, "bot", "payments.refund", tt.since, tt.sumArg)
+			if err != nil || count != tt.wantCount || sum != tt.wantSum {
+				t.Errorf("%s: got (%d, %g, %v), want (%d, %g)", tt.name, count, sum, err, tt.wantCount, tt.wantSum)
+			}
+		}
+
+		n, err := st.PruneUsage(ctx, at.Add(-24*time.Hour))
+		if err != nil || n == 0 {
+			t.Fatalf("prune: %d, %v", n, err)
+		}
+		if count, _, _ := st.CountUsage(ctx, "bot", "payments.refund", at.Add(-48*time.Hour), ""); count != 3 {
+			t.Errorf("after prune: %d calls, want 3", count)
+		}
+	})
+}
+
 func TestMigrationsAreIdempotent(t *testing.T) {
 	url := os.Getenv("CONSEQUENCE_TEST_DATABASE_URL")
 	if url == "" {
