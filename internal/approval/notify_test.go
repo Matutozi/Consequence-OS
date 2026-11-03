@@ -89,6 +89,7 @@ func testNotice() Notice {
 		Approval: Approval{
 			ID: "apr_0123456789abcdef", AgentID: "support-bot", OwnerID: "acme", Tool: "payments.refund",
 			Arguments: []byte(`{"amount":5000,"charge_id":"ch_123"}`), Level: policy.LevelIrreversible, Rule: "big-refunds",
+			ExpiresAt: time.Date(2026, 11, 2, 11, 0, 0, 0, time.UTC),
 		},
 		Approver: "ada@acme.example",
 		Link:     "http://localhost:8080/approvals/apr_0123456789abcdef?token=secret-token-value",
@@ -133,6 +134,7 @@ func TestEmailNotifierSends(t *testing.T) {
 		{"amount", string(body), "amount: 5000"},
 		{"link", string(body), testNotice().Link},
 		{"window", string(body), "once within 10 minutes"},
+		{"deadline", string(body), "If nobody decides by 11:00 UTC, 2 Nov 2026, the request expires."},
 	}
 	for _, c := range checks {
 		if !strings.Contains(c.got, c.want) {

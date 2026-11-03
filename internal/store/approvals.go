@@ -48,7 +48,7 @@ func (m *Memory) DecideApproval(_ context.Context, id string, status approval.St
 		return approval.Approval{}, approval.ErrNotFound
 	}
 	a := &m.approvals[i] // a pointer into the slice, so changes stick
-	if a.Status != approval.StatusPending {
+	if a.Status != approval.StatusPending || a.Overdue(at) {
 		return approval.Approval{}, approval.ErrNotPending
 	}
 	a.Status, a.DecidedBy, a.DecidedAt, a.ValidUntil = status, by, at, validUntil
@@ -69,6 +69,20 @@ func (m *Memory) UseApproval(_ context.Context, id string, at time.Time) (approv
 	}
 	a.Status, a.UsedAt = approval.StatusUsed, at
 	return *a, nil
+}
+
+// ExpireApprovals implements approval.Repository.
+func (m *Memory) ExpireApprovals(_ context.Context, now time.Time) ([]approval.Approval, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var expired []approval.Approval
+	for i := range m.approvals {
+		if a := &m.approvals[i]; a.Overdue(now) {
+			a.Status = approval.StatusExpired
+			expired = append(expired, *a)
+		}
+	}
+	return expired, nil
 }
 
 // indexOf finds an approval by ID. Callers must hold m.mu.

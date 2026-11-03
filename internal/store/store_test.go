@@ -302,6 +302,72 @@ func TestMarkReceiptUsed(t *testing.T) {
 	})
 }
 
+func TestExpireApprovals(t *testing.T) {
+	forEachStore(t, func(t *testing.T, st Store) {
+		ctx := context.Background()
+		due := pendingApproval("apr_due", "h1")
+		due.ExpiresAt = at.Add(time.Hour)
+		later := pendingApproval("apr_later", "h2")
+		later.ExpiresAt = at.Add(2 * time.Hour)
+		forever := pendingApproval("apr_forever", "h3") // no deadline, like rows from before expiry existed
+		decided := pendingApproval("apr_decided", "h4")
+		decided.ExpiresAt = at.Add(time.Hour)
+		for _, a := range []approval.Approval{due, later, forever, decided} {
+			if err := st.CreateApproval(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := st.DecideApproval(ctx, "apr_decided", approval.StatusRejected, "bo@acme.example", at, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := st.GetApproval(ctx, "apr_due")
+		if !got.ExpiresAt.Equal(due.ExpiresAt) {
+			t.Errorf("expires_at round trip: %v, want %v", got.ExpiresAt, due.ExpiresAt)
+		}
+
+		// An overdue approval can't be decided any more, even before a sweep.
+		if _, err := st.DecideApproval(ctx, "apr_due", approval.StatusApproved, "ada@acme.example", at.Add(time.Hour), at.Add(2*time.Hour)); !errors.Is(err, approval.ErrNotPending) {
+			t.Errorf("decide when overdue: err = %v, want ErrNotPending", err)
+		}
+
+		expired, err := st.ExpireApprovals(ctx, at.Add(time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(expired) != 1 || expired[0].ID != "apr_due" || expired[0].Status != approval.StatusExpired {
+			t.Fatalf("expired = %+v, want only apr_due", expired)
+		}
+		if again, _ := st.ExpireApprovals(ctx, at.Add(time.Hour)); len(again) != 0 {
+			t.Errorf("a second sweep returned %d approvals, want 0", len(again))
+		}
+		for id, want := range map[string]approval.Status{
+			"apr_due": approval.StatusExpired, "apr_later": approval.StatusPending,
+			"apr_forever": approval.StatusPending, "apr_decided": approval.StatusRejected,
+		} {
+			if a, _ := st.GetApproval(ctx, id); a.Status != want {
+				t.Errorf("%s: status %s, want %s", id, a.Status, want)
+			}
+		}
+	})
+}
+
+func TestPruneUsedReceipts(t *testing.T) {
+	forEachStore(t, func(t *testing.T, st Store) {
+		ctx := context.Background()
+		_ = st.MarkReceiptUsed(ctx, "rcpt_old", at, at.Add(time.Minute))
+		_ = st.MarkReceiptUsed(ctx, "rcpt_new", at, at.Add(time.Hour))
+
+		n, err := st.PruneUsedReceipts(ctx, at.Add(2*time.Minute))
+		if err != nil || n != 1 {
+			t.Fatalf("pruned %d (err %v), want 1", n, err)
+		}
+		// The unexpired one is still remembered, so it can't be replayed.
+		if err := st.MarkReceiptUsed(ctx, "rcpt_new", at, at.Add(time.Hour)); !errors.Is(err, verify.ErrAlreadyUsed) {
+			t.Errorf("rcpt_new after prune: err = %v, want ErrAlreadyUsed", err)
+		}
+	})
+}
+
 func TestMigrationsAreIdempotent(t *testing.T) {
 	url := os.Getenv("CONSEQUENCE_TEST_DATABASE_URL")
 	if url == "" {

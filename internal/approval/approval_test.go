@@ -34,7 +34,7 @@ func newEnv(t *testing.T) env {
 	st := store.NewMemory()
 	var log bytes.Buffer
 	svc := approval.NewService(approval.Options{
-		Repo: st, Validity: 10 * time.Minute, PublicURL: "http://cos.test/",
+		Repo: st, Validity: 10 * time.Minute, Timeout: time.Hour, PublicURL: "http://cos.test/",
 		Approvers: map[string][]string{"acme": {"ada@acme.example", "bo@acme.example"}},
 		Log:       slog.New(slog.NewTextHandler(&log, nil)), Now: func() time.Time { return clock },
 	})
@@ -401,5 +401,58 @@ func TestDecideTwiceIsConflict(t *testing.T) {
 	}
 	if last != http.StatusConflict {
 		t.Errorf("second decision status = %d, want 409", last)
+	}
+}
+
+func TestUnansweredApprovalExpires(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	first := e.check(t, request("5000")).Approval
+	tok := e.token(t, first.ID)
+	if want := e.clock.Add(time.Hour); !first.ExpiresAt.Equal(want) {
+		t.Fatalf("expires_at = %v, want %v", first.ExpiresAt, want)
+	}
+
+	// Just before the deadline the request is still pending.
+	*e.clock = e.clock.Add(59 * time.Minute)
+	if res := e.check(t, request("5000")); res.State != approval.StatePending || res.Approval.ID != first.ID {
+		t.Fatalf("before deadline: %+v", res)
+	}
+
+	*e.clock = e.clock.Add(time.Minute)
+	if _, err := e.svc.Decide(ctx, first.ID, tok, true); !errors.Is(err, approval.ErrExpired) {
+		t.Errorf("decide after deadline: err = %v, want ErrExpired", err)
+	}
+	// The page says so, without buttons, even before a sweep.
+	rec := httptest.NewRecorder()
+	newServer(e).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/approvals/"+first.ID+"?token="+tok, nil))
+	if body := rec.Body.String(); strings.Contains(body, `value="approve"`) || !strings.Contains(body, "Nobody decided before") {
+		t.Errorf("expired page: %s", body)
+	}
+
+	// The agent asking again opens a fresh approval.
+	again := e.check(t, request("5000"))
+	if again.State != approval.StatePending || again.Approval.ID == first.ID {
+		t.Errorf("after deadline: %+v, want a new pending approval", again)
+	}
+
+	expired, err := e.svc.ExpireOverdue(ctx)
+	if err != nil || len(expired) != 1 || expired[0].ID != first.ID {
+		t.Fatalf("ExpireOverdue = %+v, %v", expired, err)
+	}
+}
+
+func TestDecideExpiredIsGone(t *testing.T) {
+	e := newEnv(t)
+	id := e.check(t, request("5000")).Approval.ID
+	form := url.Values{"token": {e.token(t, id)}, "decision": {"approve"}}.Encode()
+	*e.clock = e.clock.Add(2 * time.Hour)
+
+	req := httptest.NewRequest(http.MethodPost, "/approvals/"+id+"/decide", strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	newServer(e).ServeHTTP(rec, req)
+	if rec.Code != http.StatusGone || !strings.Contains(rec.Body.String(), "expired") {
+		t.Errorf("got %d %s, want 410", rec.Code, rec.Body)
 	}
 }

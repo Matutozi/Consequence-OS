@@ -35,7 +35,7 @@ rules:
     tool: payments.refund
     action: ask
   - name: trusted-small-po
-    tool: odoo.purchase_order.confirm
+    tool: purchase_order.confirm
     when:
       - { arg: amount, op: lt, value: 500 }
       - { arg: supplier, op: in, value: [Coleman Cables, Acme Steel] }
@@ -71,6 +71,8 @@ func TestParseValid(t *testing.T) {
 	}{
 		{"default listen", cfg.Listen, DefaultListen},
 		{"default validity", cfg.ApprovalValidity, 10 * time.Minute},
+		{"default timeout", cfg.ApprovalTimeout, time.Hour},
+		{"no receivers by default", len(cfg.Receivers), 0},
 		{"default receipt ttl", cfg.Receipts.TTL, 5 * time.Minute},
 		{"api key resolved", cfg.Agents[0].APIKey, "secret-1"},
 		{"admin token resolved", cfg.AdminToken, "admin-1"},
@@ -101,9 +103,10 @@ func TestParseValid(t *testing.T) {
 }
 
 func TestParseOverrides(t *testing.T) {
-	yml := validYAML + "listen: \":9999\"\napproval_validity: 90s\ndatabase_url_env: DB\n" +
-		"email: { smtp_url_env: SMTP, from: approvals@acme.example }\n"
-	cfg, err := Parse([]byte(yml), baseEnv(map[string]string{"KEY_SUPPORT": "k", "DB": "postgres://x", "SMTP": "smtp://mailpit:1025"}))
+	yml := validYAML + "listen: \":9999\"\napproval_validity: 90s\napproval_timeout: 2h\ndatabase_url_env: DB\n" +
+		"email: { smtp_url_env: SMTP, from: approvals@acme.example }\n" +
+		"receivers: [{ id: payments-api, api_key_env: RECV }]\n"
+	cfg, err := Parse([]byte(yml), baseEnv(map[string]string{"KEY_SUPPORT": "k", "DB": "postgres://x", "SMTP": "smtp://mailpit:1025", "RECV": "r"}))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -113,10 +116,16 @@ func TestParseOverrides(t *testing.T) {
 	if !cfg.Email.Enabled() || cfg.Email.SMTPURL != "smtp://mailpit:1025" || cfg.Email.From != "approvals@acme.example" {
 		t.Errorf("email = %+v", cfg.Email)
 	}
+	if cfg.ApprovalTimeout != 2*time.Hour {
+		t.Errorf("approval_timeout = %v", cfg.ApprovalTimeout)
+	}
+	if got := cfg.ReceiverKeys(); len(got) != 1 || got["r"] != "payments-api" {
+		t.Errorf("receiver keys = %v", got)
+	}
 }
 
 func TestParseErrors(t *testing.T) {
-	env := baseEnv(map[string]string{"KEY_A": "a", "KEY_B": "b", "KEY_DUP": "a"})
+	env := baseEnv(map[string]string{"KEY_A": "a", "KEY_B": "b", "KEY_DUP": "a", "RECV": "r"})
 	upstream := "upstream: http://localhost:9090/mcp\n"
 	owners := "owners: [{ id: o, approvers: [ada@o.example] }]\n"
 	agentA := "agents:\n  - { id: a, owner_id: o, api_key_env: KEY_A }\n"
@@ -150,7 +159,13 @@ func TestParseErrors(t *testing.T) {
 		{"duplicate owner", upstream + base + "owners: [{ id: o, approvers: [a@o.example] }, { id: o, approvers: [b@o.example] }]\n" + agentA, "duplicate id"},
 		{"duplicate id", ok + agentA + "  - { id: a, owner_id: o, api_key_env: KEY_B }\n", "duplicate id"},
 		{"duplicate key", ok + agentA + "  - { id: b, owner_id: o, api_key_env: KEY_DUP }\n", "already used"},
-		{"agent key equals admin token", ok + "agents:\n  - { id: a, owner_id: o, api_key_env: ADMIN }\n", "must differ from the admin token"},
+		{"agent key equals admin token", ok + "agents:\n  - { id: a, owner_id: o, api_key_env: ADMIN }\n", "already used by the admin token"},
+		{"negative timeout", ok + agentA + "approval_timeout: -1m\n", "approval_timeout must be positive"},
+		{"receiver env not set", ok + agentA + "receivers: [{ id: r, api_key_env: NOPE }]\n", `receiver "r": env var NOPE is not set`},
+		{"receiver without env", ok + agentA + "receivers: [{ id: r }]\n", `receiver "r": api_key_env is required`},
+		{"receiver without id", ok + agentA + "receivers: [{ api_key_env: RECV }]\n", "every receiver needs an id"},
+		{"duplicate receiver", ok + agentA + "receivers: [{ id: r, api_key_env: RECV }, { id: r, api_key_env: KEY_B }]\n", `receiver "r": duplicate id`},
+		{"receiver key equals agent key", ok + agentA + "receivers: [{ id: r, api_key_env: KEY_DUP }]\n", `receiver "r": API key in KEY_DUP is already used by agent "a"`},
 		{"bad duration", ok + agentA + "approval_validity: soon\n", "parse config"},
 		{"bad level", ok + agentA + "tools: { x: scary }\n", "unknown level"},
 		{"bad rule", ok + agentA + "rules:\n  - { name: r, tool: x, action: maybe }\n", "unknown action"},

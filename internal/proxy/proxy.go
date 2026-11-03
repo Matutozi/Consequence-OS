@@ -213,6 +213,9 @@ func (p *Proxy) handleAsk(w http.ResponseWriter, r *http.Request, msg message, c
 			"Tell the user this action is waiting for approval. Once it is approved, retry this exact call "+
 			"with the same arguments within %s; it will then go through once.",
 			call.name, entry.Rule, a.ID, p.approvals.StatusURL(a.ID), approval.HumanDuration(p.approvals.Validity()))
+		if !a.ExpiresAt.IsZero() {
+			text += fmt.Sprintf(" If nobody decides by %s, the request expires.", a.ExpiresAt.Format(time.RFC3339))
+		}
 		writeJSON(w, http.StatusOK, toolErrorResult(msg.id, call.modern, text))
 	}
 }

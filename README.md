@@ -64,7 +64,7 @@ To stop the stack and delete its data, run `docker compose down -v`.
 2. ConsequenceOS checks that the request can't be read two ways: no batches, no duplicate keys, no keys differing only in case, and envelope headers that match the body.
 3. The policy decides **allow**, **ask** or **deny**. Calls that aren't `tools/call` pass through untouched.
 4. **deny**: the agent gets an error result and nothing is forwarded.
-5. **ask**: an approval is opened and each approver gets an email with their own link. The agent gets an "approval pending" result. Once someone approves, the same agent making the same call with the same arguments gets through once, within the validity window (10 minutes by default).
+5. **ask**: an approval is opened and each approver gets an email with their own link. The agent gets an "approval pending" result. Once someone approves, the same agent making the same call with the same arguments gets through once, within the validity window (10 minutes by default). If nobody decides within the approval timeout (1 hour by default), the request expires and the audit log records it.
 6. **allow**, or an approved retry: ConsequenceOS signs a receipt, writes the audit entry, and forwards the call. The receipt goes in the `X-Consequence-Receipt` header and in `params._meta.consequenceReceipt`.
 7. The receiver's middleware verifies the receipt with one API call before the action runs.
 
@@ -88,7 +88,7 @@ rules:
     tool: payments.refund
     action: ask
   - name: small-po-trusted-supplier
-    tool: odoo.purchase_order.confirm
+    tool: purchase_order.confirm
     when:                       # a list: every condition must hold
       - { arg: amount, op: lt, value: 500 }
       - { arg: supplier, op: in, value: [Coleman Cables, Acme Steel] }
@@ -147,23 +147,27 @@ import "github.com/matutozi/consequence-os/pkg/verify"
 
 // Every tools/call must carry a valid receipt for exactly that tool and those
 // arguments, or it's refused with 403 before your handler runs.
-guard := verify.Middleware(verify.NewClient("http://consequence-os:8080"), nil)
+receiverKey := os.Getenv("CONSEQUENCE_KEY_RECEIVER_PAYMENTS")
+guard := verify.Middleware(verify.NewClient("http://consequence-os:8080", receiverKey), nil)
 mux.Handle("/mcp", guard(yourMCPServer))
 ```
 
 Inside your handler, `verify.FromContext(r.Context())` returns the verified receipt.
 
-`verify.NewClient` makes one call per tool call, to `POST /v1/receipts/verify`. That one call checks the signatures, the expiry, the tool, the arguments and single use. To check without contacting the server, fetch the keys once with `verify.FetchKeys` and use `&verify.Offline{Keys: keys}`. Offline checking can't enforce single use, so keep your own record of used receipt IDs.
+`verify.NewClient` makes one call per tool call, to `POST /v1/receipts/verify`. That one call checks the signatures, the expiry, the tool, the arguments and single use.
+
+The verify endpoint needs a receiver key. Each check uses the receipt up, so without a key anyone could use receipts up before the real receiver sees them. List each receiver under `receivers` in the config, with the env var that holds its key, and give the receiver the same key. With no receivers listed, the endpoint refuses every call. To check without contacting the server, fetch the keys once with `verify.FetchKeys` and use `&verify.Offline{Keys: keys}`. Offline checking can't enforce single use, so keep your own record of used receipt IDs.
 
 ### Verifying over HTTP
 
 ```bash
 curl -s localhost:8080/v1/receipts/verify -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $CONSEQUENCE_KEY_RECEIVER_PAYMENTS" \
   -d '{"receipt": <the receipt object>, "tool": "payments.refund", "arguments": {"amount": 5000, "charge_id": "ch_123"}}'
 # {"valid": true, "receipt": {...}}   or   {"valid": false, "reason": "params_mismatch", ...}
 ```
 
-The possible reasons are `malformed`, `unknown_key`, `bad_signature`, `not_canonical`, `expired`, `not_yet_valid`, `tool_mismatch`, `params_mismatch`, `already_used` and `missing`.
+The possible reasons are `malformed`, `unknown_key`, `bad_signature`, `not_canonical`, `expired`, `not_yet_valid`, `tool_mismatch`, `params_mismatch`, `already_used` and `missing`. A missing or wrong receiver key gets `401`.
 
 ## Endpoints
 
@@ -172,7 +176,7 @@ The possible reasons are `malformed`, `unknown_key`, `bad_signature`, `not_canon
 | `POST /mcp` | agents | The proxy. MCP over Streamable HTTP; supports the 2026-07-28 revision and older `initialize` clients |
 | `GET /approvals/{id}` | approvers | The approval page. Read-only without a token; Approve and Reject buttons with the approver's link |
 | `POST /approvals/{id}/decide` | approvers | Records the decision, from the page's form |
-| `POST /v1/receipts/verify` | receivers | Full receipt check, including single use |
+| `POST /v1/receipts/verify` | receivers | Full receipt check, including single use. Needs a receiver key |
 | `GET /.well-known/consequence-keys` | receivers | Public keys as JWKS |
 | `GET /v1/audit` | owners | Audit log. Filters: `agent`, `tool`, `decision`, `since`, `until` (RFC 3339), `limit`. Needs the admin token |
 | `GET /healthz` | operators | Liveness check |
@@ -185,9 +189,11 @@ One YAML file names everything, and secrets live in environment variables that t
 |---|---|
 | `listen`, `public_url` | Where to listen, and the base URL used in approval links |
 | `upstream` | The MCP server to forward to |
+| `approval_timeout` | How long a held call waits for a decision before it expires (default `1h`) |
 | `approval_validity` | How long an approval stays usable after it's granted (default `10m`) |
 | `admin_token_env` | Env var holding the token for `/v1/audit` |
 | `agents` | `id`, `owner_id` and `api_key_env` for each agent |
+| `receivers` | `id` and `api_key_env` for each receiver allowed to call the verify endpoint |
 | `owners` | `id` and `approvers` (email addresses) for each owner |
 | `receipts` | `ttl` (default `5m`), `ed25519_key_env`, `mldsa87_key_env` |
 | `database_url_env` | Env var holding a Postgres URL. Without it, everything is kept in memory |
@@ -236,10 +242,9 @@ Code layout:
 This is an early MVP. Built:
 - the proxy, policy engine, approvals with email, and dual-signed receipts;
 - the Go receiver middleware;
-- the Postgres store, the audit log, and Docker.
+- the Postgres store, the audit log, and Docker;
+- expiry for unanswered approvals, and a cleanup job for used receipts.
 
 Not yet:
-- FastAPI middleware for Python receivers;
-- passkey-signed approvals;
-- the Odoo purchase order demo;
-- expiry for unanswered approvals.
+- FastAPI middleware for Python receivers (until then, Python services can call `POST /v1/receipts/verify`);
+- passkey-signed approvals.

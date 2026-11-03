@@ -81,12 +81,7 @@ func (h *Handlers) recordDecision(ctx context.Context, a Approval) {
 	if a.Status == StatusRejected {
 		outcome = audit.OutcomeDeclined
 	}
-	e := audit.Entry{
-		Time: a.DecidedAt, AgentID: a.AgentID, OwnerID: a.OwnerID, Tool: a.Tool,
-		ParamsHash: a.ParamsHash, Summary: a.Summary, Level: a.Level, Decision: policy.ActionAsk,
-		Rule: a.Rule, Outcome: outcome, ApprovalID: a.ID, Detail: "decided by " + a.DecidedBy,
-	}
-	if _, err := h.audit.AppendAudit(ctx, e); err != nil {
+	if _, err := h.audit.AppendAudit(ctx, a.AuditEntry(a.DecidedAt, outcome, "decided by "+a.DecidedBy)); err != nil {
 		// The decision itself is already saved, so only log this failure.
 		h.log.Error("audit write failed for approval decision", "approval_id", a.ID, "err", err)
 	}
@@ -102,6 +97,8 @@ func (h *Handlers) fail(w http.ResponseWriter, err error) {
 		http.Error(w, "This approver link is not valid.", http.StatusForbidden)
 	case errors.Is(err, ErrNotPending):
 		http.Error(w, "This request has already been decided.", http.StatusConflict)
+	case errors.Is(err, ErrExpired):
+		http.Error(w, "This request expired before anyone decided. If the agent asks again, a new request is sent.", http.StatusGone)
 	default:
 		h.log.Error("approval handler", "err", err)
 		http.Error(w, "Something went wrong.", http.StatusInternalServerError)
@@ -132,15 +129,17 @@ type pageData struct {
 	Note      string
 	Validity  string
 	ValidTill string
+	ExpiresAt string // when a pending request stops waiting
 }
 
 func (h *Handlers) render(w http.ResponseWriter, status int, a Approval, approver, token, note string) {
+	now := h.svc.Now()
 	data := pageData{
 		A:         a,
-		Status:    statusLabel(a, h.svc.Now()),
+		Status:    statusLabel(a, now),
 		Sentence:  sentence(a),
 		Args:      argRows(a.Arguments),
-		CanDecide: approver != "" && a.Status == StatusPending,
+		CanDecide: approver != "" && a.Status == StatusPending && !a.Overdue(now),
 		Approver:  approver,
 		Token:     token,
 		Note:      note,
@@ -148,6 +147,9 @@ func (h *Handlers) render(w http.ResponseWriter, status int, a Approval, approve
 	}
 	if !a.ValidUntil.IsZero() {
 		data.ValidTill = a.ValidUntil.Format("15:04 MST, 2 Jan 2006")
+	}
+	if !a.ExpiresAt.IsZero() {
+		data.ExpiresAt = a.ExpiresAt.Format("15:04 MST, 2 Jan 2006")
 	}
 	// Render into a buffer first so a template error can't send half a page.
 	var buf bytes.Buffer
@@ -163,7 +165,7 @@ func (h *Handlers) render(w http.ResponseWriter, status int, a Approval, approve
 
 func statusLabel(a Approval, now time.Time) string {
 	switch {
-	case a.Expired(now):
+	case a.Expired(now), a.Overdue(now), a.Status == StatusExpired:
 		return "expired"
 	case a.Status == StatusUsed:
 		return "approved and used"
@@ -262,6 +264,7 @@ var pageTemplate = template.Must(template.New("approval").Parse(`<!doctype html>
 
   {{if .CanDecide}}
     <p>You are deciding as <strong>{{.Approver}}</strong>. If you approve, the agent can make this exact call once within {{.Validity}}.</p>
+    {{if .ExpiresAt}}<p class="note">If nobody decides by {{.ExpiresAt}}, this request expires.</p>{{end}}
     <form method="post" action="/approvals/{{.A.ID}}/decide" class="buttons">
       <input type="hidden" name="token" value="{{.Token}}">
       <button class="approve" name="decision" value="approve">Approve</button>
@@ -273,6 +276,9 @@ var pageTemplate = template.Must(template.New("approval").Parse(`<!doctype html>
     <p class="note">Approved by {{.A.DecidedBy}}. The agent can make this call once, until {{.ValidTill}}.</p>
   {{else if eq .Status "rejected"}}
     <p class="note">Rejected by {{.A.DecidedBy}}. The call will not go through.</p>
+  {{else if eq .Status "expired"}}
+    {{if .A.DecidedBy}}<p class="note">Approved by {{.A.DecidedBy}}, but the agent didn't retry before {{.ValidTill}}. The call will not go through.</p>
+    {{else}}<p class="note">Nobody decided before {{.ExpiresAt}}, so this request expired. The call will not go through.</p>{{end}}
   {{end}}
 
   <p class="meta">ID {{.A.ID}} · requested {{.A.CreatedAt.Format "15:04 MST, 2 Jan 2006"}} · params hash {{.A.ParamsHash}}</p>

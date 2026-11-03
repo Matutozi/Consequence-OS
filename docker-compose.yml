@@ -49,6 +49,7 @@ services:
     image: consequenceos:dev
     entrypoint: ["/usr/local/bin/mockmcp"]
     command: ["-addr", "0.0.0.0:9090", "-require-receipts", "-verify-url", "http://consequenced:8080"]
+    env_file: .env # for its receiver key, CONSEQUENCE_KEY_RECEIVER_PAYMENTS
     ports:
       - "127.0.0.1:9090:9090"
     depends_on:

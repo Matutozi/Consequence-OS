@@ -104,6 +104,7 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 		Repo:      st,
 		Approvers: cfg.ApproversByOwner(),
 		Validity:  cfg.ApprovalValidity,
+		Timeout:   cfg.ApprovalTimeout,
 		PublicURL: cfg.PublicURL,
 		Notifier:  notifier,
 		Log:       log,
@@ -129,7 +130,10 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 	mux.HandleFunc("GET /approvals/{id}", pages.Page)
 	mux.HandleFunc("POST /approvals/{id}/decide", pages.Decide)
 	mux.Handle("GET /v1/audit", audit.Handler(st, cfg.AdminToken, log))
-	mux.Handle("POST "+verify.VerifyPath, receipt.VerifyHandler(checker, log))
+	mux.Handle("POST "+verify.VerifyPath, receipt.VerifyHandler(checker, cfg.ReceiverKeys(), log))
+	if len(cfg.Receivers) == 0 {
+		log.Warn("no receivers configured: " + verify.VerifyPath + " refuses every call; receivers can still verify offline")
+	}
 	mux.Handle("GET "+verify.KeysPath, receipt.KeysHandler(keys))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
@@ -145,6 +149,8 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 	// server error or a shutdown signal. A channel passes the result back.
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
+	j := &janitor{approvals: approvals, store: st, log: log, now: time.Now}
+	go j.run(ctx) // stops when ctx is cancelled at shutdown
 	log.Info("consequenced listening", "mcp", "http://"+cfg.Listen+"/mcp", "upstream", cfg.Upstream,
 		"agents", len(cfg.Agents), "rules", len(cfg.Rules))
 
@@ -219,9 +225,9 @@ func printSummary(out io.Writer, cfg *config.Config) {
 		storage = "Postgres, URL from $" + cfg.DatabaseURLEnv
 	}
 	fmt.Fprintf(out, "config OK\n  listen:            %s\n  public URL:        %s\n  upstream:          %s\n"+
-		"  approval validity: %s\n  receipt validity:  %s\n  admin token from:  $%s\n  storage:           %s\n",
-		cfg.Listen, cfg.PublicURL, cfg.Upstream, approval.HumanDuration(cfg.ApprovalValidity),
-		approval.HumanDuration(cfg.Receipts.TTL), cfg.AdminTokenEnv, storage)
+		"  approval timeout:  %s\n  approval validity: %s\n  receipt validity:  %s\n  admin token from:  $%s\n  storage:           %s\n",
+		cfg.Listen, cfg.PublicURL, cfg.Upstream, approval.HumanDuration(cfg.ApprovalTimeout),
+		approval.HumanDuration(cfg.ApprovalValidity), approval.HumanDuration(cfg.Receipts.TTL), cfg.AdminTokenEnv, storage)
 
 	email := "off (approver links go to the server log)"
 	if cfg.Email.Enabled() {
@@ -236,6 +242,14 @@ func printSummary(out io.Writer, cfg *config.Config) {
 	fmt.Fprintf(out, "  agents (%d):\n", len(cfg.Agents))
 	for _, a := range cfg.Agents {
 		fmt.Fprintf(out, "    - %s (owner %s, key from $%s)\n", a.ID, a.OwnerID, a.APIKeyEnv)
+	}
+	if len(cfg.Receivers) == 0 {
+		fmt.Fprintf(out, "  receivers (0): the verify endpoint is closed; receivers must verify offline\n")
+	} else {
+		fmt.Fprintf(out, "  receivers (%d), may call the verify endpoint:\n", len(cfg.Receivers))
+	}
+	for _, r := range cfg.Receivers {
+		fmt.Fprintf(out, "    - %s (key from $%s)\n", r.ID, r.APIKeyEnv)
 	}
 
 	// Map iteration order is random in Go, so sort for stable output.

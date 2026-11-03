@@ -181,16 +181,16 @@ func (p *Postgres) ListAudit(ctx context.Context, f audit.Filter) ([]audit.Entry
 // --- approvals ---
 
 const approvalColumns = `id, agent_id, owner_id, tool, params_hash, summary, arguments, level, rule,
-	status, created_at, decided_at, decided_by, valid_until, used_at`
+	status, created_at, decided_at, decided_by, valid_until, used_at, expires_at`
 
 // CreateApproval implements approval.Repository.
 func (p *Postgres) CreateApproval(ctx context.Context, a approval.Approval) error {
 	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO approvals
-			(id, agent_id, owner_id, tool, params_hash, summary, arguments, level, rule, status, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			(id, agent_id, owner_id, tool, params_hash, summary, arguments, level, rule, status, created_at, expires_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 			a.ID, a.AgentID, a.OwnerID, a.Tool, a.ParamsHash, a.Summary, string(a.Arguments),
-			string(a.Level), a.Rule, string(a.Status), a.CreatedAt)
+			string(a.Level), a.Rule, string(a.Status), a.CreatedAt, nullTime(a.ExpiresAt))
 		if err != nil {
 			return fmt.Errorf("postgres: create approval: %w", err)
 		}
@@ -220,7 +220,8 @@ func (p *Postgres) FindLatestApproval(ctx context.Context, agentID, tool, params
 func (p *Postgres) DecideApproval(ctx context.Context, id string, status approval.Status, by string, at, validUntil time.Time) (approval.Approval, error) {
 	a, err := p.scanApproval(ctx, p.pool.QueryRow(ctx, `UPDATE approvals
 		SET status = $2, decided_by = $3, decided_at = $4, valid_until = $5
-		WHERE id = $1 AND status = 'pending' RETURNING `+approvalColumns,
+		WHERE id = $1 AND status = 'pending' AND (expires_at IS NULL OR expires_at > $4)
+		RETURNING `+approvalColumns,
 		id, string(status), by, at, nullTime(validUntil)))
 	if errors.Is(err, approval.ErrNotFound) {
 		return approval.Approval{}, p.whyNoRow(ctx, id, approval.ErrNotPending)
@@ -238,6 +239,29 @@ func (p *Postgres) UseApproval(ctx context.Context, id string, at time.Time) (ap
 	return a, err
 }
 
+// ExpireApprovals implements approval.Repository. One UPDATE both finds and
+// changes the rows, so two servers can't both expire the same approval.
+func (p *Postgres) ExpireApprovals(ctx context.Context, now time.Time) ([]approval.Approval, error) {
+	rows, err := p.pool.Query(ctx, `UPDATE approvals SET status = 'expired'
+		WHERE status = 'pending' AND expires_at <= $1 RETURNING id`, now)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: expire approvals: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("postgres: expire approvals: %w", err)
+	}
+	expired := make([]approval.Approval, 0, len(ids))
+	for _, id := range ids {
+		a, err := p.GetApproval(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		expired = append(expired, a)
+	}
+	return expired, nil
+}
+
 // whyNoRow tells "doesn't exist" apart from "exists but in the wrong state".
 func (p *Postgres) whyNoRow(ctx context.Context, id string, wrongState error) error {
 	var exists bool
@@ -253,9 +277,9 @@ func (p *Postgres) whyNoRow(ctx context.Context, id string, wrongState error) er
 func (p *Postgres) scanApproval(ctx context.Context, row pgx.Row) (approval.Approval, error) {
 	var a approval.Approval
 	var args, level, status string
-	var decidedAt, validUntil, usedAt *time.Time // pointers, because these columns can be NULL
+	var decidedAt, validUntil, usedAt, expiresAt *time.Time // pointers, because these columns can be NULL
 	err := row.Scan(&a.ID, &a.AgentID, &a.OwnerID, &a.Tool, &a.ParamsHash, &a.Summary, &args, &level, &a.Rule,
-		&status, &a.CreatedAt, &decidedAt, &a.DecidedBy, &validUntil, &usedAt)
+		&status, &a.CreatedAt, &decidedAt, &a.DecidedBy, &validUntil, &usedAt, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return approval.Approval{}, approval.ErrNotFound
 	}
@@ -264,7 +288,7 @@ func (p *Postgres) scanApproval(ctx context.Context, row pgx.Row) (approval.Appr
 	}
 	a.Arguments, a.Level, a.Status = []byte(args), policy.Level(level), approval.Status(status)
 	a.CreatedAt = a.CreatedAt.UTC()
-	a.DecidedAt, a.ValidUntil, a.UsedAt = utc(decidedAt), utc(validUntil), utc(usedAt)
+	a.DecidedAt, a.ValidUntil, a.UsedAt, a.ExpiresAt = utc(decidedAt), utc(validUntil), utc(usedAt), utc(expiresAt)
 
 	rows, err := p.pool.Query(ctx, `SELECT approver, token_hash FROM approval_tokens WHERE approval_id = $1 ORDER BY approver`, a.ID)
 	if err != nil {
@@ -299,8 +323,7 @@ func (p *Postgres) MarkReceiptUsed(ctx context.Context, receiptID string, usedAt
 	return nil
 }
 
-// PruneUsedReceipts deletes records of receipts that have expired, which
-// can no longer be presented anyway. Safe to run at any time.
+// PruneUsedReceipts implements Store. Safe to run at any time, from any server.
 func (p *Postgres) PruneUsedReceipts(ctx context.Context, now time.Time) (int64, error) {
 	tag, err := p.pool.Exec(ctx, `DELETE FROM used_receipts WHERE expires_at < $1`, now)
 	if err != nil {

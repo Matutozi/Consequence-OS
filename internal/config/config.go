@@ -20,6 +20,7 @@ import (
 const (
 	DefaultListen           = "127.0.0.1:8080"
 	DefaultApprovalValidity = 10 * time.Minute
+	DefaultApprovalTimeout  = time.Hour
 	DefaultReceiptTTL       = 5 * time.Minute
 )
 
@@ -28,9 +29,14 @@ type Config struct {
 	Listen           string        `yaml:"listen"`
 	Upstream         string        `yaml:"upstream"`
 	ApprovalValidity time.Duration `yaml:"approval_validity"` // yaml.v3 parses strings like "10m"
+	ApprovalTimeout  time.Duration `yaml:"approval_timeout"`  // how long a held call waits for a decision
 	Agents           []Agent       `yaml:"agents"`
-	Tools            policy.Levels `yaml:"tools"`
-	Rules            []policy.Rule `yaml:"rules"`
+
+	// Receivers may call POST /v1/receipts/verify, each with its own key.
+	// With none listed, receivers can only verify offline with the public keys.
+	Receivers []Receiver    `yaml:"receivers"`
+	Tools     policy.Levels `yaml:"tools"`
+	Rules     []policy.Rule `yaml:"rules"`
 
 	// AdminTokenEnv names the env var holding the token for owner endpoints
 	// such as GET /v1/audit.
@@ -95,6 +101,14 @@ type Agent struct {
 	APIKey    string `yaml:"-"` // filled from the env var; "-" means YAML never reads or writes it
 }
 
+// Receiver is a service that checks receipts with the verify endpoint
+// before acting. Like agents, its key lives in an env var.
+type Receiver struct {
+	ID        string `yaml:"id"`
+	APIKeyEnv string `yaml:"api_key_env"`
+	APIKey    string `yaml:"-"`
+}
+
 // LookupEnv has the same signature as os.LookupEnv, so tests can pass a fake.
 type LookupEnv func(key string) (string, bool)
 
@@ -139,6 +153,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.ApprovalValidity == 0 {
 		c.ApprovalValidity = DefaultApprovalValidity
+	}
+	if c.ApprovalTimeout == 0 {
+		c.ApprovalTimeout = DefaultApprovalTimeout
 	}
 	if c.Receipts.TTL == 0 {
 		c.Receipts.TTL = DefaultReceiptTTL
@@ -190,15 +207,29 @@ func (c *Config) resolveSecrets(lookupEnv LookupEnv) error {
 	// Index into the slice so we modify the element, not a copy of it.
 	for i := range c.Agents {
 		a := &c.Agents[i]
-		if a.APIKeyEnv == "" {
-			return fmt.Errorf("agent %q: api_key_env is required", a.ID)
+		if err := resolveKey("agent", a.ID, a.APIKeyEnv, &a.APIKey, lookupEnv); err != nil {
+			return err
 		}
-		key, ok := lookupEnv(a.APIKeyEnv)
-		if !ok || key == "" {
-			return fmt.Errorf("agent %q: env var %s is not set", a.ID, a.APIKeyEnv)
-		}
-		a.APIKey = key
 	}
+	for i := range c.Receivers {
+		r := &c.Receivers[i]
+		if err := resolveKey("receiver", r.ID, r.APIKeyEnv, &r.APIKey, lookupEnv); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveKey reads the API key for an agent or receiver from its env var.
+func resolveKey(kind, id, env string, dest *string, lookupEnv LookupEnv) error {
+	if env == "" {
+		return fmt.Errorf("%s %q: api_key_env is required", kind, id)
+	}
+	key, ok := lookupEnv(env)
+	if !ok || key == "" {
+		return fmt.Errorf("%s %q: env var %s is not set", kind, id, env)
+	}
+	*dest = key
 	return nil
 }
 
@@ -209,10 +240,16 @@ func (c *Config) validate() error {
 	if c.ApprovalValidity < 0 {
 		return errors.New("approval_validity must be positive")
 	}
+	if c.ApprovalTimeout < 0 {
+		return errors.New("approval_timeout must be positive")
+	}
 	if c.Receipts.TTL < 0 {
 		return errors.New("receipts.ttl must be positive")
 	}
 	if err := validateAgents(c.Agents); err != nil {
+		return err
+	}
+	if err := c.validateKeys(); err != nil {
 		return err
 	}
 	if err := validateOwners(c.Owners, c.Agents); err != nil {
@@ -224,11 +261,6 @@ func (c *Config) validate() error {
 		}
 	} else if c.Email.From != "" {
 		return errors.New("email.from is set but email.smtp_url_env is not")
-	}
-	for _, a := range c.Agents {
-		if a.APIKey == c.AdminToken {
-			return fmt.Errorf("agent %q: API key in %s must differ from the admin token", a.ID, a.APIKeyEnv)
-		}
 	}
 	if err := validateOrigins(c.AllowedOrigins); err != nil {
 		return err
@@ -305,7 +337,6 @@ func validateAgents(agents []Agent) error {
 		return errors.New("at least one agent is required")
 	}
 	ids := make(map[string]bool)
-	keys := make(map[string]bool)
 	for _, a := range agents {
 		if a.ID == "" || a.OwnerID == "" {
 			return fmt.Errorf("agent %q: id and owner_id are required", a.ID)
@@ -313,12 +344,52 @@ func validateAgents(agents []Agent) error {
 		if ids[a.ID] {
 			return fmt.Errorf("agent %q: duplicate id", a.ID)
 		}
-		if keys[a.APIKey] {
-			// Don't print the key; name the env var instead.
-			return fmt.Errorf("agent %q: API key in %s is already used by another agent", a.ID, a.APIKeyEnv)
-		}
 		ids[a.ID] = true
-		keys[a.APIKey] = true
 	}
 	return nil
+}
+
+// validateKeys checks receiver IDs and that no two credentials are the same
+// secret, so an agent's key can't verify receipts or read the audit log.
+func (c *Config) validateKeys() error {
+	ids := make(map[string]bool)
+	for _, r := range c.Receivers {
+		if r.ID == "" {
+			return errors.New("receivers: every receiver needs an id")
+		}
+		if ids[r.ID] {
+			return fmt.Errorf("receiver %q: duplicate id", r.ID)
+		}
+		ids[r.ID] = true
+	}
+
+	// owner maps each secret to who uses it. Errors name env vars, never keys.
+	owner := map[string]string{c.AdminToken: "the admin token"}
+	claim := func(key, who, env string) error {
+		if other, taken := owner[key]; taken {
+			return fmt.Errorf("%s: API key in %s is already used by %s", who, env, other)
+		}
+		owner[key] = who
+		return nil
+	}
+	for _, a := range c.Agents {
+		if err := claim(a.APIKey, fmt.Sprintf("agent %q", a.ID), a.APIKeyEnv); err != nil {
+			return err
+		}
+	}
+	for _, r := range c.Receivers {
+		if err := claim(r.APIKey, fmt.Sprintf("receiver %q", r.ID), r.APIKeyEnv); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReceiverKeys maps each receiver's API key to its ID.
+func (c *Config) ReceiverKeys() map[string]string {
+	m := make(map[string]string, len(c.Receivers))
+	for _, r := range c.Receivers {
+		m[r.APIKey] = r.ID
+	}
+	return m
 }

@@ -4,11 +4,12 @@ MOCK_ADDR ?= 127.0.0.1:9090
 # Secrets from .env (created by `make env`) win over the dev defaults below.
 # "-include" means: read it if it exists, carry on quietly if not.
 -include .env
-export CONSEQUENCE_KEY_SUPPORT_BOT CONSEQUENCE_ADMIN_TOKEN CONSEQUENCE_SIGNING_KEY_ED25519 CONSEQUENCE_SIGNING_KEY_MLDSA87
 
-# Local development defaults only. Make real signing keys with
-# `go run ./cmd/consequenced -genkeys` or `make env`.
+# Local development defaults only, used for anything .env doesn't set. Make
+# real signing keys with `go run ./cmd/consequenced -genkeys` or `make env`.
+# "export X ?= v" keeps a value .env already gave X, and exports it either way.
 export CONSEQUENCE_KEY_SUPPORT_BOT ?= dev-support-bot-key
+export CONSEQUENCE_KEY_RECEIVER_PAYMENTS ?= dev-payments-receiver-key
 export CONSEQUENCE_ADMIN_TOKEN ?= dev-admin-token
 export CONSEQUENCE_SIGNING_KEY_ED25519 ?= DtGH8ZUfSXLicN70bT3ZFCAY92rPDxyTXs4CTRnQkGA
 export CONSEQUENCE_SIGNING_KEY_MLDSA87 ?= d981o8Ahw7SPWkniT-C-PSaH-CDeOSX9aZCCf4OfeYI
