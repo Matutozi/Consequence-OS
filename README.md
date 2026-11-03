@@ -1,5 +1,7 @@
 # ConsequenceOS
 
+[![CI](https://github.com/Matutozi/Consequence-OS/actions/workflows/ci.yml/badge.svg)](https://github.com/Matutozi/Consequence-OS/actions/workflows/ci.yml)
+
 **No receipt, no action.** ConsequenceOS sits between an AI agent and the MCP tool server it calls. It checks every tool call against your policy, holds risky calls until a human approves, and attaches a signed receipt to every call it lets through. The service on the other end refuses any call that doesn't carry a valid receipt.
 
 ```
@@ -221,7 +223,12 @@ Without email set up, the approver's link is printed in the `make run` terminal.
 make test           # all tests
 make lint           # go vet + gofmt check
 make test-postgres  # store tests against a real Postgres
+make bench          # how much latency the proxy adds
 ```
+
+CI runs `make lint`, all the tests with the race detector (including the Postgres store tests), and a Docker build on every push to `main` and every pull request.
+
+**Overhead.** On a 2017 laptop CPU (i7-7820HQ), the proxy adds about 1.5 ms to an allowed call. Most of that is signing the receipt with both keys. A denied call takes about 0.05 ms, because it never reaches the upstream. These figures use the in-memory store; with Postgres, each call also waits for one audit write.
 
 `make test-postgres` needs a Postgres where the tests may create and drop databases. For example:
 
@@ -248,3 +255,7 @@ This is an early MVP. Built:
 Not yet:
 - FastAPI middleware for Python receivers (until then, Python services can call `POST /v1/receipts/verify`);
 - passkey-signed approvals.
+
+## License
+
+ConsequenceOS is licensed under the [Apache License 2.0](LICENSE).

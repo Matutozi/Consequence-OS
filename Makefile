@@ -18,7 +18,7 @@ export CONSEQUENCE_SIGNING_KEY_MLDSA87 ?= d981o8Ahw7SPWkniT-C-PSaH-CDeOSX9aZCCf4
 # and drop throwaway databases.
 TEST_DATABASE_URL ?= postgres://postgres:test@127.0.0.1:55432/postgres
 
-.PHONY: run check mock demo demo-approval demo-receipts test test-postgres lint env up down logs
+.PHONY: run check mock demo demo-approval demo-receipts test test-postgres bench lint env up down logs
 
 run:
 	go run ./cmd/consequenced -config $(CONFIG)
@@ -47,6 +47,10 @@ test:
 
 test-postgres:
 	CONSEQUENCE_TEST_DATABASE_URL=$(TEST_DATABASE_URL) go test ./internal/store/
+
+# What the proxy adds to a call: compare AllowedCall with UpstreamDirect.
+bench:
+	go test -run '^$$' -bench . -benchmem ./internal/proxy/
 
 lint:
 	go vet ./...

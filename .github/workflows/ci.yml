@@ -1,0 +1,47 @@
+# Runs on every push to main and every pull request: formatting, go vet,
+# all tests with the race detector (Postgres store tests included), and a
+# Docker build so the quickstart image can't break unnoticed.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      # The store tests create and drop their own databases on this server.
+      CONSEQUENCE_TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: gofmt and go vet
+        run: make lint
+      - name: Tests (race detector on)
+        run: go test -race -count=1 ./...
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the image
+        run: docker build -t consequenceos:ci .
