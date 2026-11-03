@@ -22,6 +22,7 @@ const (
 	OutcomeRejected  Outcome = "rejected"  // malformed, never evaluated
 	OutcomeApproved  Outcome = "approved"  // a human approved a held call
 	OutcomeDeclined  Outcome = "declined"  // a human said no, or a retry of a declined call
+	OutcomeExpired   Outcome = "expired"   // nobody decided on a held call in time
 )
 
 // Entry is one line in the audit log. It never holds raw arguments, only

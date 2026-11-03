@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,10 @@ import (
 // VerifyPath is the ConsequenceOS endpoint that fully checks a receipt,
 // including single use.
 const VerifyPath = "/v1/receipts/verify"
+
+// ErrUnauthorized means the verify endpoint did not accept the receiver's
+// API key. It's a setup problem, not a receipt problem; the call is refused.
+var ErrUnauthorized = errors.New("verify: the server did not accept this receiver's API key")
 
 // VerifyRequest is the body of POST /v1/receipts/verify.
 type VerifyRequest struct {
@@ -41,11 +46,13 @@ type Verifier interface {
 // is the full check: signatures, expiry, tool, arguments and single use.
 type Client struct {
 	BaseURL string       // e.g. "http://localhost:8080"
-	HTTP    *http.Client // nil means a client with a 10 second timeout
+	APIKey  string       // this receiver's key, listed under receivers in the server's config
+	HTTP    *http.Client // nil means http.DefaultClient
 }
 
-func NewClient(baseURL string) *Client {
-	return &Client{BaseURL: strings.TrimSuffix(baseURL, "/"), HTTP: &http.Client{Timeout: 10 * time.Second}}
+// NewClient returns a Client with a 10 second timeout.
+func NewClient(baseURL, apiKey string) *Client {
+	return &Client{BaseURL: strings.TrimSuffix(baseURL, "/"), APIKey: apiKey, HTTP: &http.Client{Timeout: 10 * time.Second}}
 }
 
 // Verify implements Verifier. It marks the receipt used: call it only right
@@ -60,6 +67,7 @@ func (c *Client) Verify(ctx context.Context, receipt []byte, tool string, argume
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	client := c.HTTP
 	if client == nil {
 		client = http.DefaultClient
@@ -69,6 +77,9 @@ func (c *Client) Verify(ctx context.Context, receipt []byte, tool string, argume
 		return nil, fmt.Errorf("verify: %w", err) // a network failure: the caller must refuse the action
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, ErrUnauthorized
+	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err

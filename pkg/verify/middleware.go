@@ -29,7 +29,7 @@ func FromContext(ctx context.Context) (*Receipt, bool) {
 // receipt for exactly that tool and those arguments, or it is refused with
 // HTTP 403 before the handler runs. Other MCP messages pass through.
 //
-//	mux.Handle("/mcp", verify.Middleware(verify.NewClient("http://localhost:8080"), nil)(myServer))
+//	mux.Handle("/mcp", verify.Middleware(verify.NewClient("http://localhost:8080", receiverKey), nil)(myServer))
 func Middleware(v Verifier, log *slog.Logger) func(http.Handler) http.Handler {
 	if log == nil {
 		log = slog.Default()
@@ -75,7 +75,7 @@ func Middleware(v Verifier, log *slog.Logger) func(http.Handler) http.Handler {
 			}
 			verified, err := v.Verify(r.Context(), receipt, call.name, call.arguments)
 			if err != nil {
-				log.Warn("tools/call refused", "tool", call.name, "reason", Reason(err))
+				log.Warn("tools/call refused", "tool", call.name, "reason", Reason(err), "err", err)
 				reject(w, call.id, err)
 				return
 			}

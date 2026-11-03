@@ -213,5 +213,8 @@ func emailBody(n Notice) string {
 	fmt.Fprintf(&b, "Review it and approve or reject:\r\n%s\r\n\r\n", n.Link)
 	fmt.Fprintf(&b, "This link is for %s only: anyone who has it can decide as you. "+
 		"If you approve, the agent can make this exact call once within %s.\r\n", n.Approver, HumanDuration(n.Validity))
+	if !a.ExpiresAt.IsZero() {
+		fmt.Fprintf(&b, "\r\nIf nobody decides by %s, the request expires.\r\n", a.ExpiresAt.Format("15:04 MST, 2 Jan 2006"))
+	}
 	return b.String()
 }

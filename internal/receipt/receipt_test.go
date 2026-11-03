@@ -68,7 +68,7 @@ func (h harness) issue(t *testing.T, approvedBy string) []byte {
 	hash, _ := verify.ParamsHash([]byte(args))
 	encoded, _, err := h.issuer.Issue(Input{
 		AgentID: "procurement-bot", OwnerID: "acme", ApprovedBy: approvedBy,
-		Tool: "odoo.purchase_order.confirm", ParamsHash: hash, Summary: "odoo.purchase_order.confirm with amount, po",
+		Tool: "purchase_order.confirm", ParamsHash: hash, Summary: "purchase_order.confirm with amount, po",
 		Level: "irreversible", Policy: "po-over-500-needs-manager",
 	})
 	if err != nil {
@@ -79,7 +79,7 @@ func (h harness) issue(t *testing.T, approvedBy string) []byte {
 
 func TestIssuedReceiptContents(t *testing.T) {
 	h := newHarness(t)
-	r, err := h.checker.Verify(context.Background(), h.issue(t, "ada@acme.example"), "odoo.purchase_order.confirm", []byte(args))
+	r, err := h.checker.Verify(context.Background(), h.issue(t, "ada@acme.example"), "purchase_order.confirm", []byte(args))
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestIssuedReceiptContents(t *testing.T) {
 		}
 	}
 
-	policyOnly, err := h.checker.Verify(context.Background(), h.issue(t, ""), "odoo.purchase_order.confirm", []byte(args))
+	policyOnly, err := h.checker.Verify(context.Background(), h.issue(t, ""), "purchase_order.confirm", []byte(args))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestVerifyRejects(t *testing.T) {
 		{
 			name:    "different tool",
 			receipt: func(t *testing.T, h harness) []byte { return h.issue(t, "") },
-			tool:    "odoo.purchase_order.cancel",
+			tool:    "purchase_order.cancel",
 			want:    verify.ErrToolMismatch,
 		},
 		{
@@ -231,7 +231,7 @@ func TestVerifyRejects(t *testing.T) {
 			h := newHarness(t)
 			receipt := tt.receipt(t, h)
 			*h.clock = h.clock.Add(tt.advance)
-			tool, a := "odoo.purchase_order.confirm", args
+			tool, a := "purchase_order.confirm", args
 			if tt.tool != "" {
 				tool = tt.tool
 			}
@@ -249,10 +249,10 @@ func TestVerifyRejects(t *testing.T) {
 func TestSingleUse(t *testing.T) {
 	h := newHarness(t)
 	receipt := h.issue(t, "")
-	if _, err := h.checker.Verify(context.Background(), receipt, "odoo.purchase_order.confirm", []byte(args)); err != nil {
+	if _, err := h.checker.Verify(context.Background(), receipt, "purchase_order.confirm", []byte(args)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.checker.Verify(context.Background(), receipt, "odoo.purchase_order.confirm", []byte(args)); !errors.Is(err, verify.ErrAlreadyUsed) {
+	if _, err := h.checker.Verify(context.Background(), receipt, "purchase_order.confirm", []byte(args)); !errors.Is(err, verify.ErrAlreadyUsed) {
 		t.Errorf("replay: err = %v, want ErrAlreadyUsed", err)
 	}
 }
@@ -260,8 +260,8 @@ func TestSingleUse(t *testing.T) {
 func TestFailedCheckDoesNotBurnReceipt(t *testing.T) {
 	h := newHarness(t)
 	receipt := h.issue(t, "")
-	_, _ = h.checker.Verify(context.Background(), receipt, "odoo.purchase_order.confirm", []byte(`{"amount":1}`))
-	if _, err := h.checker.Verify(context.Background(), receipt, "odoo.purchase_order.confirm", []byte(args)); err != nil {
+	_, _ = h.checker.Verify(context.Background(), receipt, "purchase_order.confirm", []byte(`{"amount":1}`))
+	if _, err := h.checker.Verify(context.Background(), receipt, "purchase_order.confirm", []byte(args)); err != nil {
 		t.Errorf("a mismatched attempt used up the receipt: %v", err)
 	}
 }
@@ -284,7 +284,7 @@ func TestHandlers(t *testing.T) {
 	h := newHarness(t)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/receipts/verify", VerifyHandler(h.checker, log))
+	mux.Handle("POST /v1/receipts/verify", VerifyHandler(h.checker, map[string]string{"recv-key": "payments-api"}, log))
 	mux.Handle("GET /.well-known/consequence-keys", KeysHandler(h.keys))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -296,26 +296,35 @@ func TestHandlers(t *testing.T) {
 	}
 	receipt := h.issue(t, "")
 	offline := &verify.Offline{Keys: keys, Now: func() time.Time { return *h.clock }}
-	if _, err := offline.Verify(context.Background(), receipt, "odoo.purchase_order.confirm", []byte(args)); err != nil {
+	if _, err := offline.Verify(context.Background(), receipt, "purchase_order.confirm", []byte(args)); err != nil {
 		t.Fatalf("offline verify: %v", err)
 	}
 
+	// Without the receiver's key the server refuses, and the receipt isn't used up.
+	for _, key := range []string{"", "wrong-key"} {
+		if _, err := verify.NewClient(srv.URL, key).Verify(context.Background(), receipt, "purchase_order.confirm", []byte(args)); !errors.Is(err, verify.ErrUnauthorized) {
+			t.Errorf("key %q: err = %v, want ErrUnauthorized", key, err)
+		}
+	}
+
 	// Then online, with single use. One call per check.
-	client := verify.NewClient(srv.URL)
-	if _, err := client.Verify(context.Background(), receipt, "odoo.purchase_order.confirm", []byte(args)); err != nil {
+	client := verify.NewClient(srv.URL, "recv-key")
+	if _, err := client.Verify(context.Background(), receipt, "purchase_order.confirm", []byte(args)); err != nil {
 		t.Fatalf("online verify: %v", err)
 	}
-	if _, err := client.Verify(context.Background(), receipt, "odoo.purchase_order.confirm", []byte(args)); !errors.Is(err, verify.ErrAlreadyUsed) {
+	if _, err := client.Verify(context.Background(), receipt, "purchase_order.confirm", []byte(args)); !errors.Is(err, verify.ErrAlreadyUsed) {
 		t.Errorf("online replay: err = %v, want ErrAlreadyUsed", err)
 	}
 
 	// A receipt sent as a JSON string works too.
 	asString, _ := json.Marshal(string(h.issue(t, "")))
-	if _, err := client.Verify(context.Background(), asString, "odoo.purchase_order.confirm", []byte(args)); err != nil {
+	if _, err := client.Verify(context.Background(), asString, "purchase_order.confirm", []byte(args)); err != nil {
 		t.Errorf("receipt as string: %v", err)
 	}
 
-	resp, err := http.Post(srv.URL+"/v1/receipts/verify", "application/json", strings.NewReader(`{"tool":""}`))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/receipts/verify", strings.NewReader(`{"tool":""}`))
+	req.Header.Set("Authorization", "Bearer recv-key")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

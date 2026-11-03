@@ -1,6 +1,7 @@
 // Package approval holds risky tool calls until a human decides. An approval
 // is bound to one agent, one tool and one exact set of arguments (by hash),
 // and once approved it lets exactly one retry through within a time window.
+// An approval nobody decides on expires after a timeout.
 package approval
 
 import (
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matutozi/consequence-os/internal/audit"
 	"github.com/matutozi/consequence-os/internal/policy"
 )
 
@@ -27,13 +29,15 @@ const (
 	StatusPending  Status = "pending"
 	StatusApproved Status = "approved"
 	StatusRejected Status = "rejected"
-	StatusUsed     Status = "used" // approved, and the retry has gone through
+	StatusUsed     Status = "used"    // approved, and the retry has gone through
+	StatusExpired  Status = "expired" // nobody decided before the timeout
 )
 
 // Errors returned by a Repository and the Service.
 var (
 	ErrNotFound   = errors.New("approval not found")
 	ErrNotPending = errors.New("approval has already been decided")
+	ErrExpired    = errors.New("approval expired before anyone decided")
 	ErrNotUsable  = errors.New("approval is not approved, has expired, or was already used")
 	ErrBadToken   = errors.New("approver token is missing or wrong")
 	ErrNoApprover = errors.New("no approvers are configured for this owner")
@@ -59,6 +63,7 @@ type Approval struct {
 	Rule       string          `json:"rule"`
 	Status     Status          `json:"status"`
 	CreatedAt  time.Time       `json:"created_at"`
+	ExpiresAt  time.Time       `json:"expires_at"` // a decision must come before this
 	DecidedAt  time.Time       `json:"decided_at,omitempty"`
 	DecidedBy  string          `json:"decided_by,omitempty"`
 	ValidUntil time.Time       `json:"valid_until,omitempty"` // set when approved
@@ -70,6 +75,21 @@ func (a Approval) Expired(now time.Time) bool {
 	return a.Status == StatusApproved && !now.Before(a.ValidUntil)
 }
 
+// Overdue reports whether a pending approval is past its decision deadline.
+// It may still read "pending" until the next sweep marks it expired.
+func (a Approval) Overdue(now time.Time) bool {
+	return a.Status == StatusPending && !a.ExpiresAt.IsZero() && !now.Before(a.ExpiresAt)
+}
+
+// AuditEntry describes something that happened to this approval, for the audit log.
+func (a Approval) AuditEntry(at time.Time, outcome audit.Outcome, detail string) audit.Entry {
+	return audit.Entry{
+		Time: at, AgentID: a.AgentID, OwnerID: a.OwnerID, Tool: a.Tool,
+		ParamsHash: a.ParamsHash, Summary: a.Summary, Level: a.Level, Decision: policy.ActionAsk,
+		Rule: a.Rule, Outcome: outcome, ApprovalID: a.ID, Detail: detail,
+	}
+}
+
 // Repository stores approvals. Implementations must make DecideApproval and
 // UseApproval atomic, so two concurrent retries can't both use one approval.
 type Repository interface {
@@ -78,11 +98,15 @@ type Repository interface {
 	// FindLatestApproval returns the newest approval for this agent, tool and
 	// arguments, or ErrNotFound.
 	FindLatestApproval(ctx context.Context, agentID, tool, paramsHash string) (Approval, error)
-	// DecideApproval moves a pending approval to approved or rejected, or
-	// returns ErrNotPending.
+	// DecideApproval moves a pending approval that isn't overdue at time at
+	// to approved or rejected, or returns ErrNotPending.
 	DecideApproval(ctx context.Context, id string, status Status, by string, at, validUntil time.Time) (Approval, error)
 	// UseApproval marks an approved, unexpired approval as used, or returns ErrNotUsable.
 	UseApproval(ctx context.Context, id string, at time.Time) (Approval, error)
+	// ExpireApprovals marks every approval overdue at now as expired and
+	// returns them. Each approval is returned by exactly one call, even with
+	// several servers sharing the store.
+	ExpireApprovals(ctx context.Context, now time.Time) ([]Approval, error)
 }
 
 // Request describes a held call.
@@ -117,6 +141,7 @@ type Options struct {
 	Repo      Repository
 	Approvers map[string][]string // owner ID -> approver emails
 	Validity  time.Duration       // how long an approval stays usable after it's granted
+	Timeout   time.Duration       // how long a held call waits for a decision; 0 means forever
 	PublicURL string              // base URL for links, e.g. http://localhost:8080
 	Notifier  Notifier            // delivers approver links; nil means LogNotifier
 	Log       *slog.Logger
@@ -128,6 +153,7 @@ type Service struct {
 	repo      Repository
 	approvers map[string][]string
 	validity  time.Duration
+	timeout   time.Duration
 	publicURL string
 	notifier  Notifier
 	log       *slog.Logger
@@ -139,6 +165,7 @@ func NewService(opts Options) *Service {
 		repo:      opts.Repo,
 		approvers: opts.Approvers,
 		validity:  opts.Validity,
+		timeout:   opts.Timeout,
 		publicURL: strings.TrimSuffix(opts.PublicURL, "/"),
 		notifier:  opts.Notifier,
 		log:       opts.Log,
@@ -156,6 +183,9 @@ func NewService(opts Options) *Service {
 // Validity returns how long an approval stays usable after it's granted.
 func (s *Service) Validity() time.Duration { return s.validity }
 
+// Timeout returns how long a held call waits for a decision.
+func (s *Service) Timeout() time.Duration { return s.timeout }
+
 // Check decides whether a held call may go through. It reuses a pending
 // approval for the same call, lets one retry through after approval, and
 // opens a new approval when there is none (or the last one expired or was used).
@@ -167,6 +197,8 @@ func (s *Service) Check(ctx context.Context, req Request) (Result, error) {
 		// nothing yet: open a new approval below
 	case err != nil:
 		return Result{}, err
+	case latest.Overdue(now):
+		// Nobody decided in time. The sweep marks it expired; ask afresh.
 	case latest.Status == StatusPending:
 		return Result{State: StatePending, Approval: latest}, nil
 	case latest.Status == StatusApproved && !latest.Expired(now):
@@ -223,6 +255,9 @@ func (s *Service) open(ctx context.Context, req Request, now time.Time) (Approva
 		Status:     StatusPending,
 		CreatedAt:  now,
 	}
+	if s.timeout > 0 {
+		a.ExpiresAt = now.Add(s.timeout)
+	}
 	if err := s.repo.CreateApproval(ctx, a); err != nil {
 		return Approval{}, err
 	}
@@ -256,10 +291,20 @@ func (s *Service) Decide(ctx context.Context, id, token string, approve bool) (A
 		return Approval{}, ErrBadToken
 	}
 	now := s.now().UTC()
-	if approve {
-		return s.repo.DecideApproval(ctx, id, StatusApproved, by, now, now.Add(s.validity))
+	if a.Overdue(now) || a.Status == StatusExpired {
+		return Approval{}, ErrExpired
 	}
-	return s.repo.DecideApproval(ctx, id, StatusRejected, by, now, time.Time{})
+	status, validUntil := StatusRejected, time.Time{}
+	if approve {
+		status, validUntil = StatusApproved, now.Add(s.validity)
+	}
+	return s.repo.DecideApproval(ctx, id, status, by, now, validUntil)
+}
+
+// ExpireOverdue marks every approval that's past its deadline as expired
+// and returns them, so the caller can record each one once.
+func (s *Service) ExpireOverdue(ctx context.Context) ([]Approval, error) {
+	return s.repo.ExpireApprovals(ctx, s.now().UTC())
 }
 
 // Now returns the service's current time, so pages agree with Check about expiry.

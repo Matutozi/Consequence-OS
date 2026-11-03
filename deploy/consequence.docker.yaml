@@ -4,7 +4,8 @@
 listen: "0.0.0.0:8080"                  # inside the container; compose publishes it on 127.0.0.1
 public_url: "http://localhost:8080"      # what links in emails point at
 upstream: "http://mockmcp:9090/mcp"
-approval_validity: 10m
+approval_validity: 10m   # how long an approval stays usable once granted
+approval_timeout: 1h     # how long a held call waits for a decision
 
 admin_token_env: CONSEQUENCE_ADMIN_TOKEN
 allowed_origins: []
@@ -29,12 +30,18 @@ agents:
     owner_id: acme
     api_key_env: CONSEQUENCE_KEY_SUPPORT_BOT
 
+# Receivers may check receipts with POST /v1/receipts/verify, which also
+# marks each receipt used, so each one needs its own key.
+receivers:
+  - id: payments-api
+    api_key_env: CONSEQUENCE_KEY_RECEIVER_PAYMENTS
+
 # Consequence level per tool: read, reversible or irreversible.
 # Tools not listed here are treated as irreversible.
 tools:
   notes.read: read
   payments.refund: irreversible
-  odoo.purchase_order.confirm: irreversible
+  purchase_order.confirm: irreversible
 
 # Evaluated top to bottom; the first match wins. With no match, read tools
 # are allowed and everything else asks a human.
@@ -43,13 +50,13 @@ tools:
 # Ops: eq, ne, gt, gte, lt, lte, and in / not_in with a list value.
 rules:
   - name: small-po-trusted-supplier
-    tool: odoo.purchase_order.confirm
+    tool: purchase_order.confirm
     when:
       - { arg: amount, op: lt, value: 500 }
       - { arg: supplier, op: in, value: [Coleman Cables, Acme Steel] }
     action: allow
   - name: po-needs-manager
-    tool: odoo.purchase_order.confirm
+    tool: purchase_order.confirm
     action: ask
   - name: small-refunds
     tool: payments.refund

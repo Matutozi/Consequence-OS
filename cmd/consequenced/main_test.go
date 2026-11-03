@@ -31,7 +31,7 @@ rules:
     tool: payments.refund
     action: ask
   - name: small-po-trusted-supplier
-    tool: odoo.purchase_order.confirm
+    tool: purchase_order.confirm
     when:
       - { arg: amount, op: lt, value: 500 }
       - { arg: supplier, op: in, value: [Coleman Cables, Acme Steel] }
@@ -58,8 +58,8 @@ func TestRun(t *testing.T) {
 		{"big refund", []string{"-config", path, "-tool", "payments.refund", "-args", `{"amount":5000}`}, "action=ask rule=big-refunds", ""},
 		{"read tool", []string{"-config", path, "-tool", "notes.read"}, "level=read action=allow rule=default", ""},
 		{"summary joins conditions", []string{"-config", path, "-check"}, "when amount lt 500 and supplier in [Coleman Cables, Acme Steel]", ""},
-		{"small po from trusted supplier", []string{"-config", path, "-tool", "odoo.purchase_order.confirm", "-args", `{"amount":120,"supplier":"Coleman Cables"}`}, "action=allow rule=small-po-trusted-supplier", ""},
-		{"small po from unknown supplier", []string{"-config", path, "-tool", "odoo.purchase_order.confirm", "-args", `{"amount":120,"supplier":"Someone Else"}`}, "action=ask rule=default", ""},
+		{"small po from trusted supplier", []string{"-config", path, "-tool", "purchase_order.confirm", "-args", `{"amount":120,"supplier":"Coleman Cables"}`}, "action=allow rule=small-po-trusted-supplier", ""},
+		{"small po from unknown supplier", []string{"-config", path, "-tool", "purchase_order.confirm", "-args", `{"amount":120,"supplier":"Someone Else"}`}, "action=ask rule=default", ""},
 		{"bad args", []string{"-config", path, "-tool", "notes.read", "-args", "[1]"}, "", "JSON object"},
 		{"missing config", []string{"-config", "/does/not/exist.yaml"}, "", "read config"},
 	}

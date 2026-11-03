@@ -1,5 +1,5 @@
-// Package store holds ConsequenceOS state behind one interface. Stage 2 has
-// an in-memory implementation; Postgres arrives in stage 4.
+// Package store holds ConsequenceOS state behind one interface, with an
+// in-memory implementation and a Postgres one.
 package store
 
 import (
@@ -27,6 +27,9 @@ type Store interface {
 	// MarkReceiptUsed records a receipt as used, or returns
 	// verify.ErrAlreadyUsed. Atomic, so a receipt works exactly once.
 	MarkReceiptUsed(ctx context.Context, receiptID string, usedAt, expiresAt time.Time) error
+	// PruneUsedReceipts forgets used receipts that expired before now; an
+	// expired receipt fails verification anyway. Returns how many it removed.
+	PruneUsedReceipts(ctx context.Context, now time.Time) (int64, error)
 
 	// Close releases connections. The in-memory store has nothing to release.
 	Close()
@@ -56,16 +59,22 @@ func (m *Memory) MarkReceiptUsed(_ context.Context, receiptID string, usedAt, ex
 	if _, used := m.receipts[receiptID]; used {
 		return verify.ErrAlreadyUsed
 	}
-	// Expired receipts fail verification anyway, so forget them now and then.
-	if len(m.receipts) > 10_000 {
-		for id, exp := range m.receipts {
-			if exp.Before(usedAt) {
-				delete(m.receipts, id)
-			}
-		}
-	}
 	m.receipts[receiptID] = expiresAt
 	return nil
+}
+
+// PruneUsedReceipts implements Store.
+func (m *Memory) PruneUsedReceipts(_ context.Context, now time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for id, exp := range m.receipts {
+		if exp.Before(now) {
+			delete(m.receipts, id) // deleting while ranging over a map is allowed in Go
+			n++
+		}
+	}
+	return n, nil
 }
 
 // AppendAudit implements Store.

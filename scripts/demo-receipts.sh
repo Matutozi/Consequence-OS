@@ -10,6 +10,7 @@ PROXY="${PROXY:-http://127.0.0.1:8080}"
 MOCK="${MOCK:-http://127.0.0.1:9090}"
 AGENT_KEY="${CONSEQUENCE_KEY_SUPPORT_BOT:-dev-support-bot-key}"
 ADMIN_TOKEN="${CONSEQUENCE_ADMIN_TOKEN:-dev-admin-token}"
+RECEIVER_KEY="${CONSEQUENCE_KEY_RECEIVER_PAYMENTS:-dev-payments-receiver-key}"
 VERSION="2026-07-28"
 
 pretty() { if command -v jq >/dev/null; then jq .; else cat; echo; fi; }
@@ -45,9 +46,14 @@ step "4. A forged receipt is refused too"
 send "$MOCK" payments.refund '{"charge_id":"ch_123","amount":5000}' \
   -H 'X-Consequence-Receipt: {"payload":"eyJhbW91bnQiOjUwMDB9","signatures":[]}'
 
-step "5. Asking the verify endpoint about a made-up receipt"
-curl -sS "$PROXY/v1/receipts/verify" -H "Content-Type: application/json" \
-  -d '{"receipt":{"payload":"e30","signatures":[]},"tool":"payments.refund","arguments":{"amount":20}}' | pretty
+VERIFY_BODY='{"receipt":{"payload":"e30","signatures":[]},"tool":"payments.refund","arguments":{"amount":20}}'
 
-step "6. The audit log: the allowed call names its receipt"
+step "5. Only listed receivers may use the verify endpoint, because each check uses a receipt up"
+curl -sS "$PROXY/v1/receipts/verify" -H "Content-Type: application/json" -d "$VERIFY_BODY" -w '\nHTTP %{http_code}\n'
+
+step "6. With the receiver's key, a made-up receipt gets a clear answer"
+curl -sS "$PROXY/v1/receipts/verify" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $RECEIVER_KEY" -d "$VERIFY_BODY" | pretty
+
+step "7. The audit log: the allowed call names its receipt"
 curl -sS "$PROXY/v1/audit?tool=payments.refund&limit=3" -H "Authorization: Bearer $ADMIN_TOKEN" | pretty

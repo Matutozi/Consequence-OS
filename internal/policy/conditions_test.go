@@ -10,16 +10,16 @@ import (
 func TestEvaluateMultipleConditions(t *testing.T) {
 	rules := []Rule{
 		{
-			Name: "small-trusted-po", Tool: "odoo.purchase_order.confirm",
+			Name: "small-trusted-po", Tool: "purchase_order.confirm",
 			When: Conditions{
 				{Arg: "amount", Op: OpLt, Value: 500},
 				{Arg: "supplier", Op: OpIn, Value: []any{"Coleman Cables", "Acme Steel"}},
 			},
 			Action: ActionAllow,
 		},
-		{Name: "po-needs-manager", Tool: "odoo.purchase_order.confirm", Action: ActionAsk},
+		{Name: "po-needs-manager", Tool: "purchase_order.confirm", Action: ActionAsk},
 	}
-	engine, err := NewEngine(rules, Levels{"odoo.purchase_order.confirm": LevelIrreversible})
+	engine, err := NewEngine(rules, Levels{"purchase_order.confirm": LevelIrreversible})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestEvaluateMultipleConditions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := engine.Evaluate("odoo.purchase_order.confirm", tt.args); got.Rule != tt.wantRule {
+			if got := engine.Evaluate("purchase_order.confirm", tt.args); got.Rule != tt.wantRule {
 				t.Errorf("rule = %q, want %q", got.Rule, tt.wantRule)
 			}
 		})
