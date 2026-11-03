@@ -65,6 +65,7 @@ func (*failingStore) AppendAudit(context.Context, audit.Entry) (audit.Entry, err
 type fixture struct {
 	proxy       *Proxy
 	up          *upstream
+	upstreamURL string // the fake upstream's /mcp, for calling it directly
 	store       store.Store
 	approvals   *approval.Service
 	checker     *receipt.Checker // verifies receipts the way the receiver's server would
@@ -90,7 +91,9 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-func newFixture(t *testing.T, st store.Store) fixture {
+// newFixture takes testing.TB, the interface both *testing.T and
+// *testing.B satisfy, so benchmarks can use it too.
+func newFixture(t testing.TB, st store.Store) fixture {
 	t.Helper() // failures point at the caller, not this line
 	up := &upstream{}
 	srv := httptest.NewServer(up)
@@ -142,7 +145,7 @@ func newFixture(t *testing.T, st store.Store) fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fixture{proxy: p, up: up, store: st, approvals: svc, checker: checker, clock: &clock, approvalLog: approvalLog}
+	return fixture{proxy: p, up: up, upstreamURL: srv.URL + "/mcp", store: st, approvals: svc, checker: checker, clock: &clock, approvalLog: approvalLog}
 }
 
 func call(tool string, args string) string {
