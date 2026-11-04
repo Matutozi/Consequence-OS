@@ -125,7 +125,6 @@ func (i *Issuer) Issue(in Input) ([]byte, verify.Receipt, error) {
 		Policy:     in.Policy,
 		IssuedAt:   verify.Timestamp{Time: issued},
 		ExpiresAt:  verify.Timestamp{Time: issued.Add(i.ttl)},
-		SingleUse:  true,
 	}
 	encoded, err := i.sign(r)
 	return encoded, r, err

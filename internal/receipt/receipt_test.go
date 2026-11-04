@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -95,7 +96,6 @@ func TestIssuedReceiptContents(t *testing.T) {
 		{"policy", r.Policy, "po-over-500-needs-manager"},
 		{"issued", r.IssuedAt.Time, testStart},
 		{"expires", r.ExpiresAt.Time, testStart.Add(5 * time.Minute)},
-		{"single use", r.SingleUse, true},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -332,4 +332,60 @@ func TestHandlers(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("malformed request: status %d, want 400", resp.StatusCode)
 	}
+}
+
+// TestPayloadFitsDraftContentRules guards the IETF draft's content rules:
+// only objects, arrays, strings and non-negative integers, nested at most
+// 8 levels. No booleans, null or fractions.
+func TestPayloadFitsDraftContentRules(t *testing.T) {
+	h := newHarness(t)
+	for _, approvedBy := range []string{"", "ada@acme.example"} {
+		var signed verify.Signed
+		if err := json.Unmarshal(h.issue(t, approvedBy), &signed); err != nil {
+			t.Fatal(err)
+		}
+		payload, err := b64.DecodeString(signed.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dec := json.NewDecoder(bytes.NewReader(payload))
+		dec.UseNumber() // keep numbers as written, to spot fractions
+		var v any
+		if err := dec.Decode(&v); err != nil {
+			t.Fatal(err)
+		}
+		if problem := draftContentProblem(v, 1); problem != "" {
+			t.Errorf("approved_by %q: %s", approvedBy, problem)
+		}
+	}
+}
+
+func draftContentProblem(v any, depth int) string {
+	if depth > 8 {
+		return "nested deeper than 8 levels"
+	}
+	switch x := v.(type) {
+	case string:
+		return ""
+	case json.Number:
+		if n, err := x.Int64(); err != nil || n < 0 {
+			return "number " + x.String() + " is not a non-negative integer"
+		}
+		return ""
+	case map[string]any:
+		for k, child := range x {
+			if p := draftContentProblem(child, depth+1); p != "" {
+				return k + ": " + p
+			}
+		}
+		return ""
+	case []any:
+		for _, child := range x {
+			if p := draftContentProblem(child, depth+1); p != "" {
+				return p
+			}
+		}
+		return ""
+	}
+	return "value of type " + strings.TrimPrefix(fmt.Sprintf("%T", v), "*") + " is not allowed"
 }
