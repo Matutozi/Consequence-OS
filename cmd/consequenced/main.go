@@ -5,6 +5,7 @@
 //	consequenced -tool payments.refund -args '{...}' show the policy decision for one call
 //	             [-at 2026-11-02T22:00:00Z]          ...as if made at that time
 //	consequenced -genkeys                            print fresh receipt signing keys
+//	consequenced -version                            print the version
 package main
 
 import (
@@ -33,6 +34,10 @@ import (
 	"github.com/matutozi/consequence-os/pkg/verify"
 )
 
+// version is set when release builds are made, with
+// -ldflags "-X main.version=v0.1.0"; a plain go build says "dev".
+var version = "dev"
+
 func main() {
 	// The context is cancelled on Ctrl-C or SIGTERM, which triggers a clean shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -54,8 +59,13 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	toolArgs := fs.String("args", "{}", "JSON arguments for -tool")
 	at := fs.String("at", "", "for -tool: decide as if the call came at this RFC 3339 time (default now)")
 	genKeys := fs.Bool("genkeys", false, "print fresh receipt signing keys as env var lines and exit")
+	showVersion := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *showVersion {
+		fmt.Fprintln(out, "consequenced", version)
+		return nil
 	}
 	if *genKeys {
 		return printKeys(out)
@@ -153,7 +163,7 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 	go func() { errc <- srv.ListenAndServe() }()
 	j := &janitor{approvals: approvals, store: st, keepUsage: engine.LongestWindow(), log: log, now: time.Now}
 	go j.run(ctx) // stops when ctx is cancelled at shutdown
-	log.Info("consequenced listening", "mcp", "http://"+cfg.Listen+"/mcp", "upstream", cfg.Upstream,
+	log.Info("consequenced listening", "version", version, "mcp", "http://"+cfg.Listen+"/mcp", "upstream", cfg.Upstream,
 		"agents", len(cfg.Agents), "rules", len(cfg.Rules))
 
 	select {

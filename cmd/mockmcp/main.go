@@ -9,6 +9,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,12 +18,20 @@ import (
 	"github.com/matutozi/consequence-os/pkg/verify"
 )
 
+// version is set by release builds; see cmd/consequenced.
+var version = "dev"
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:9090", "address to listen on")
 	requireReceipts := flag.Bool("require-receipts", false, "refuse tool calls without a valid ConsequenceOS receipt")
 	verifyURL := flag.String("verify-url", "http://127.0.0.1:8080", "ConsequenceOS server that checks receipts")
 	keyEnv := flag.String("verify-key-env", "CONSEQUENCE_KEY_RECEIVER_PAYMENTS", "env var holding this receiver's API key")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("mockmcp", version)
+		return
+	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	var handler http.Handler = NewServer(defaultTools(), log)

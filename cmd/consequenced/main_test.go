@@ -122,3 +122,13 @@ func TestServeStopsOnCancel(t *testing.T) {
 		t.Fatal("server did not shut down")
 	}
 }
+
+func TestVersionFlag(t *testing.T) {
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-version"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "consequenced dev\n" {
+		t.Errorf("got %q", got)
+	}
+}

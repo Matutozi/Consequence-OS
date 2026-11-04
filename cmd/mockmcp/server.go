@@ -26,6 +26,10 @@ const (
 	metaServerInfo         = "io.modelcontextprotocol/serverInfo"
 )
 
+// cacheableMethods return a CacheableResult in 2026-07-28, which must carry
+// ttlMs and cacheScope (schema/2026-07-28: DiscoverResult, ListToolsResult).
+var cacheableMethods = map[string]bool{"server/discover": true, "tools/list": true}
+
 // legacyVersions are the pre-2026 revisions we answer initialize for, newest first.
 var legacyVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26"}
 
@@ -191,6 +195,13 @@ func (s *Server) handle(r *http.Request, msg message) reply {
 	if modern && rep.err == nil {
 		rep.result["resultType"] = "complete"
 		rep.result["_meta"] = map[string]any{metaServerInfo: serverInfo}
+		if cacheableMethods[msg.Method] {
+			// 2026-07-28 requires caching hints on these results. 0 means
+			// "immediately stale", and private means no cache may share the
+			// answer across API keys: the safe choice for a proxy-facing server.
+			rep.result["ttlMs"] = 0
+			rep.result["cacheScope"] = "private"
+		}
 	}
 	return rep
 }
