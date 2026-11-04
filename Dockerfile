@@ -28,7 +28,12 @@ LABEL org.opencontainers.image.source="https://github.com/Matutozi/Consequence-O
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/consequenced /out/mockmcp /usr/local/bin/
 COPY consequence.yaml /etc/consequenceos/consequence.yaml
+# consequenced looks for consequence.yaml in its working directory, so
+# `docker run <image> -check` finds the mounted config without -config.
+WORKDIR /etc/consequenceos
 USER nonroot
+# Inside a container, 127.0.0.1 can't be reached from outside, so listen on
+# every interface. -listen or a different CONSEQUENCE_LISTEN overrides it.
+ENV CONSEQUENCE_LISTEN=0.0.0.0:8080
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/consequenced"]
-CMD ["-config", "/etc/consequenceos/consequence.yaml"]

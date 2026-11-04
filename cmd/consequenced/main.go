@@ -1,6 +1,7 @@
 // Command consequenced is the ConsequenceOS proxy server.
 //
 //	consequenced -config consequence.yaml            run the server
+//	             [-listen 0.0.0.0:8080]              ...on this address (or $CONSEQUENCE_LISTEN)
 //	consequenced -check                              validate config, print a summary, exit
 //	consequenced -tool payments.refund -args '{...}' show the policy decision for one call
 //	             [-at 2026-11-02T22:00:00Z]          ...as if made at that time
@@ -54,6 +55,7 @@ func main() {
 func run(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("consequenced", flag.ContinueOnError)
 	configPath := fs.String("config", "consequence.yaml", "path to the config file")
+	listen := fs.String("listen", "", "address to listen on, e.g. 0.0.0.0:8080; overrides $"+config.ListenEnv+" and the config file")
 	check := fs.Bool("check", false, "validate the config, print a summary and exit")
 	tool := fs.String("tool", "", "evaluate a call to this tool against the policy and exit")
 	toolArgs := fs.String("args", "{}", "JSON arguments for -tool")
@@ -71,7 +73,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return printKeys(out)
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.LoadEnv(*configPath, withListen(*listen))
 	if err != nil {
 		return err
 	}
@@ -88,6 +90,20 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return nil
 	}
 	return serve(ctx, cfg, engine)
+}
+
+// withListen returns the process environment, with -listen (when given)
+// standing in for CONSEQUENCE_LISTEN, so the flag beats the env var.
+func withListen(listen string) config.LookupEnv {
+	if listen == "" {
+		return os.LookupEnv
+	}
+	return func(key string) (string, bool) {
+		if key == config.ListenEnv {
+			return listen, true
+		}
+		return os.LookupEnv(key)
+	}
 }
 
 // serve runs the HTTP server until ctx is cancelled.
