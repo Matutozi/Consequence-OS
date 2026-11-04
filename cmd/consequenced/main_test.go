@@ -63,6 +63,7 @@ func TestRun(t *testing.T) {
 		{"bad args", []string{"-config", path, "-tool", "notes.read", "-args", "[1]"}, "", "JSON object"},
 		{"missing config", []string{"-config", "/does/not/exist.yaml"}, "", "read config"},
 		{"-listen overrides the file", []string{"-config", path, "-listen", "0.0.0.0:9999", "-check"}, "listen:            0.0.0.0:9999\n  public URL:        http://localhost:9999", ""},
+		{"-verify-audit needs a database", []string{"-config", path, "-verify-audit"}, "", "needs database_url_env"},
 		{"-listen is checked", []string{"-config", path, "-listen", "nonsense", "-check"}, "", `listen "nonsense" must look like`},
 	}
 	for _, tt := range tests {

@@ -42,6 +42,11 @@ type Entry struct {
 	ApprovalID string        `json:"approval_id,omitempty"`
 	ReceiptID  string        `json:"receipt_id,omitempty"`
 	Detail     string        `json:"detail,omitempty"`
+
+	// The hash chain (see chain.go). Seq is the entry's place in the log.
+	Seq      int64  `json:"seq"`
+	PrevHash string `json:"prev_hash"`
+	Hash     string `json:"hash"`
 }
 
 // Filter selects entries. Zero values mean "any".

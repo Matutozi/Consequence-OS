@@ -133,7 +133,10 @@ func TestAudit(t *testing.T) {
 		// Every field survives the round trip.
 		oldest, _ := st.ListAudit(ctx, audit.Filter{Until: at.Add(time.Second)})
 		want := seed[0]
-		want.ID = oldest[0].ID
+		want.ID, want.Seq, want.Hash = oldest[0].ID, 1, oldest[0].Hash
+		if !strings.HasPrefix(want.Hash, "sha256:") {
+			t.Errorf("first entry has no chain hash: %+v", oldest[0])
+		}
 		if oldest[0] != want {
 			t.Errorf("round trip:\n got  %+v\n want %+v", oldest[0], want)
 		}
@@ -427,5 +430,138 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	n, err := st.PruneUsedReceipts(context.Background(), at)
 	if err != nil || n != 0 {
 		t.Errorf("prune on empty table: %d, %v", n, err)
+	}
+}
+
+func TestAuditChain(t *testing.T) {
+	forEachStore(t, func(t *testing.T, st Store) {
+		ctx := context.Background()
+		if _, ok, err := st.LastAudit(ctx); ok || err != nil {
+			t.Fatalf("empty log: ok=%v err=%v", ok, err)
+		}
+		var last audit.Entry
+		for i := 0; i < 5; i++ {
+			// Nanoseconds are rounded away, so the hash still matches after a database round trip.
+			e, err := st.AppendAudit(ctx, audit.Entry{Time: at.Add(time.Duration(i)*time.Second + 789), AgentID: "bot", OwnerID: "o",
+				Tool: "payments.refund", Outcome: audit.OutcomeForwarded})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e.PrevHash != last.Hash {
+				t.Fatalf("entry %d links to %q, want %q", i, e.PrevHash, last.Hash)
+			}
+			last = e
+		}
+		head, ok, err := st.LastAudit(ctx)
+		if !ok || err != nil || head.ID != last.ID || head.Hash != last.Hash {
+			t.Errorf("LastAudit = %+v, %v, %v", head, ok, err)
+		}
+		r, err := audit.VerifyChain(ctx, st)
+		if err != nil || !r.Intact || r.Checked != 5 || r.HeadHash != last.Hash {
+			t.Errorf("report = %+v, err = %v", r, err)
+		}
+	})
+}
+
+func TestConcurrentAppendsKeepOneChain(t *testing.T) {
+	forEachStore(t, func(t *testing.T, st Store) {
+		ctx := context.Background()
+		var wg sync.WaitGroup
+		for i := 0; i < 40; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := st.AppendAudit(ctx, audit.Entry{Time: at, AgentID: "bot", OwnerID: "o", Tool: "x", Outcome: audit.OutcomeForwarded}); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		wg.Wait()
+		if r, err := audit.VerifyChain(ctx, st); err != nil || !r.Intact || r.Checked != 40 {
+			t.Errorf("report = %+v, err = %v (a fork or a lost link)", r, err)
+		}
+	})
+}
+
+// tamper changes the stored log behind the store's back, as someone with
+// direct database access could.
+func tamper(t *testing.T, st Store, how string, id string) {
+	t.Helper()
+	switch s := st.(type) {
+	case *Memory:
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for i := range s.audit {
+			if s.audit[i].ID != id {
+				continue
+			}
+			if how == "edit" {
+				s.audit[i].Summary = "nothing to see here"
+			} else {
+				s.audit = append(s.audit[:i], s.audit[i+1:]...)
+			}
+			return
+		}
+	case *Postgres:
+		query := `UPDATE audit_entries SET summary = 'nothing to see here' WHERE id = $1`
+		if how == "delete" {
+			query = `DELETE FROM audit_entries WHERE id = $1`
+		}
+		if _, err := s.pool.Exec(context.Background(), query, id); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	t.Fatalf("could not tamper with %s", id)
+}
+
+func TestTamperingIsDetected(t *testing.T) {
+	for _, how := range []string{"edit", "delete"} {
+		t.Run(how, func(t *testing.T) {
+			forEachStore(t, func(t *testing.T, st Store) {
+				ctx := context.Background()
+				var ids []string
+				for i := 0; i < 4; i++ {
+					e, err := st.AppendAudit(ctx, audit.Entry{Time: at, AgentID: "bot", OwnerID: "o", Tool: "x", Outcome: audit.OutcomeForwarded})
+					if err != nil {
+						t.Fatal(err)
+					}
+					ids = append(ids, e.ID)
+				}
+				tamper(t, st, how, ids[1])
+				r, err := audit.VerifyChain(ctx, st)
+				want := ids[1] // an edited entry fails its own hash
+				if how == "delete" {
+					want = ids[2] // the entry after a deleted one no longer links
+				}
+				if err != nil || r.Intact || r.BrokenAt != want {
+					t.Errorf("report = %+v, err = %v; want broken at %s", r, err, want)
+				}
+			})
+		})
+	}
+}
+
+func TestChainStartsAfterOlderRows(t *testing.T) {
+	st, ok := newTestPostgres(t).(*Postgres)
+	if !ok {
+		t.Skip("postgres only")
+	}
+	ctx := context.Background()
+	// Rows from before migration 0004 have empty hashes.
+	for _, id := range []string{"aud_old0000000001", "aud_old0000000002"} {
+		if _, err := st.pool.Exec(ctx, `INSERT INTO audit_entries (id, time, agent_id, owner_id, tool, outcome)
+			VALUES ($1, $2, 'bot', 'o', 'x', 'forwarded')`, id, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := st.AppendAudit(ctx, audit.Entry{Time: at, AgentID: "bot", OwnerID: "o", Tool: "x", Outcome: audit.OutcomeForwarded}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := audit.VerifyChain(ctx, st)
+	if err != nil || !r.Intact || r.Unhashed != 2 || r.Checked != 3 {
+		t.Errorf("report = %+v, err = %v", r, err)
 	}
 }

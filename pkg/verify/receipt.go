@@ -157,21 +157,9 @@ func SigningInput(protected, payload string) []byte {
 // keys, and that it is currently valid. It does not check single use; only
 // the issuer can, through POST /v1/receipts/verify (see Client).
 func VerifyOffline(encoded []byte, keys *KeySet, now time.Time) (*Receipt, error) {
-	var signed Signed
-	if err := decodeStrict(encoded, &signed); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
-	}
-	if err := verifySignatures(signed, keys); err != nil {
-		return nil, err
-	}
-
-	payload, err := b64.DecodeString(signed.Payload)
+	payload, err := verifiedPayload(encoded, keys, MediaType)
 	if err != nil {
-		return nil, fmt.Errorf("%w: payload is not base64url", ErrMalformed)
-	}
-	// The signed bytes must already be canonical; we check, never rewrite.
-	if canonical, err := Canonicalize(payload); err != nil || !bytes.Equal(canonical, payload) {
-		return nil, ErrNotCanonical
+		return nil, err
 	}
 	var r Receipt
 	if err := decodeStrict(payload, &r); err != nil {
@@ -190,9 +178,32 @@ func VerifyOffline(encoded []byte, keys *KeySet, now time.Time) (*Receipt, error
 	return &r, nil
 }
 
+// verifiedPayload checks a signed object's encoding and both signatures,
+// requiring the protected headers to say typ, and returns the canonical
+// payload. The typ check keeps a signed audit head from passing as a
+// receipt, and the other way round.
+func verifiedPayload(encoded []byte, keys *KeySet, typ string) ([]byte, error) {
+	var signed Signed
+	if err := decodeStrict(encoded, &signed); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
+	if err := verifySignatures(signed, keys, typ); err != nil {
+		return nil, err
+	}
+	payload, err := b64.DecodeString(signed.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("%w: payload is not base64url", ErrMalformed)
+	}
+	// The signed bytes must already be canonical; we check, never rewrite.
+	if canonical, err := Canonicalize(payload); err != nil || !bytes.Equal(canonical, payload) {
+		return nil, ErrNotCanonical
+	}
+	return payload, nil
+}
+
 // verifySignatures requires exactly one Ed25519 signature followed by one
 // ML-DSA-87 signature, both by known keys, both valid.
-func verifySignatures(signed Signed, keys *KeySet) error {
+func verifySignatures(signed Signed, keys *KeySet, typ string) error {
 	want := []string{AlgEd25519, AlgMLDSA87}
 	if len(signed.Signatures) != len(want) {
 		return fmt.Errorf("%w: want %d signatures, got %d", ErrMalformed, len(want), len(signed.Signatures))
@@ -202,8 +213,8 @@ func verifySignatures(signed Signed, keys *KeySet) error {
 		if err != nil {
 			return err
 		}
-		if header.Typ != MediaType || header.Alg != want[i] {
-			return fmt.Errorf("%w: signature %d must be typ %s, alg %s", ErrMalformed, i+1, MediaType, want[i])
+		if header.Typ != typ || header.Alg != want[i] {
+			return fmt.Errorf("%w: signature %d must be typ %s, alg %s", ErrMalformed, i+1, typ, want[i])
 		}
 		raw, err := b64.DecodeString(sig.Signature)
 		if err != nil {

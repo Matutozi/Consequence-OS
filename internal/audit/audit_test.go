@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -131,5 +132,49 @@ func TestHandlerPassesFilter(t *testing.T) {
 	want := Filter{AgentID: "a", Tool: "t", Decision: policy.ActionDeny}
 	if l.got != want {
 		t.Errorf("store got filter %+v, want %+v", l.got, want)
+	}
+}
+
+type fakeHead struct {
+	last Entry
+	ok   bool
+}
+
+func (f fakeHead) LastAudit(context.Context) (Entry, bool, error) { return f.last, f.ok, nil }
+
+func TestVerifyAndHeadHandlers(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	entries := chainOf(t, 3)
+	// A copy with the middle entry removed. (append on entries[:1] would overwrite entries itself.)
+	missing := append([]Entry{entries[0]}, entries[2:]...)
+	sign := func(seq int64, hash string) ([]byte, error) {
+		return []byte(fmt.Sprintf(`{"signed":%d,"hash":%q}`, seq, hash)), nil
+	}
+	tests := []struct {
+		name       string
+		handler    http.Handler
+		token      string
+		wantStatus int
+		wantBody   string
+	}{
+		{"verify needs the token", VerifyHandler(walker(entries), "admin", log), "", 401, "admin token required"},
+		{"verify intact", VerifyHandler(walker(entries), "admin", log), "admin", 200, `"intact":true`},
+		{"verify broken", VerifyHandler(walker(missing), "admin", log), "admin", 200, `"broken_at":"aud_c"`},
+		{"head needs the token", HeadHandler(fakeHead{entries[2], true}, sign, "admin", log), "wrong", 401, "admin token required"},
+		{"head is signed", HeadHandler(fakeHead{entries[2], true}, sign, "admin", log), "admin", 200, `{"signed":3,"hash":"` + entries[2].Hash + `"}`},
+		{"empty log has no head", HeadHandler(fakeHead{}, sign, "admin", log), "admin", 404, "no chained entries"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/audit/x", nil)
+			if tt.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tt.token)
+			}
+			rec := httptest.NewRecorder()
+			tt.handler.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus || !strings.Contains(rec.Body.String(), tt.wantBody) {
+				t.Errorf("got %d %s", rec.Code, rec.Body)
+			}
+		})
 	}
 }

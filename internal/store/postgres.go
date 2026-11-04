@@ -30,6 +30,10 @@ var migrationFiles embed.FS
 // so only one of them migrates at a time.
 const migrationLock = 7_461_002
 
+// auditChainLock serializes audit appends across every process sharing the
+// database, so each entry links to the true previous one and the chain never forks.
+const auditChainLock = 7_461_003
+
 // Postgres is a Store backed by PostgreSQL.
 type Postgres struct {
 	pool *pgxpool.Pool
@@ -113,15 +117,79 @@ func (p *Postgres) AppendAudit(ctx context.Context, e audit.Entry) (audit.Entry,
 		}
 		e.ID = id
 	}
-	_, err := p.pool.Exec(ctx, `INSERT INTO audit_entries
-		(id, time, agent_id, owner_id, tool, params_hash, summary, level, decision, rule, outcome, approval_id, receipt_id, detail)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-		e.ID, e.Time, e.AgentID, e.OwnerID, e.Tool, e.ParamsHash, e.Summary, string(e.Level), string(e.Decision),
-		e.Rule, string(e.Outcome), e.ApprovalID, e.ReceiptID, e.Detail)
+	err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		// Held until the transaction ends: the read of the last hash and the
+		// insert happen as one step for every server sharing the database.
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, auditChainLock); err != nil {
+			return err
+		}
+		var prev string
+		err := tx.QueryRow(ctx, `SELECT hash FROM audit_entries ORDER BY seq DESC LIMIT 1`).Scan(&prev)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if e, err = audit.Chain(prev, e); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `INSERT INTO audit_entries
+			(id, time, agent_id, owner_id, tool, params_hash, summary, level, decision, rule, outcome,
+			 approval_id, receipt_id, detail, prev_hash, hash)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING seq`,
+			e.ID, e.Time, e.AgentID, e.OwnerID, e.Tool, e.ParamsHash, e.Summary, string(e.Level), string(e.Decision),
+			e.Rule, string(e.Outcome), e.ApprovalID, e.ReceiptID, e.Detail, e.PrevHash, e.Hash).Scan(&e.Seq)
+	})
 	if err != nil {
 		return audit.Entry{}, fmt.Errorf("postgres: append audit: %w", err)
 	}
 	return e, nil
+}
+
+const auditColumns = `seq, id, time, agent_id, owner_id, tool, params_hash, summary, level, decision, rule,
+	outcome, approval_id, receipt_id, detail, prev_hash, hash`
+
+func scanAudit(row pgx.Row) (audit.Entry, error) {
+	var e audit.Entry
+	var level, decision, outcome string
+	err := row.Scan(&e.Seq, &e.ID, &e.Time, &e.AgentID, &e.OwnerID, &e.Tool, &e.ParamsHash, &e.Summary,
+		&level, &decision, &e.Rule, &outcome, &e.ApprovalID, &e.ReceiptID, &e.Detail, &e.PrevHash, &e.Hash)
+	if err != nil {
+		return audit.Entry{}, err
+	}
+	e.Time = e.Time.UTC()
+	e.Level, e.Decision, e.Outcome = policy.Level(level), policy.Action(decision), audit.Outcome(outcome)
+	return e, nil
+}
+
+// ForEachAudit implements audit.Walker, reading the log in order without
+// loading it all into memory.
+func (p *Postgres) ForEachAudit(ctx context.Context, fn func(audit.Entry) error) error {
+	rows, err := p.pool.Query(ctx, `SELECT `+auditColumns+` FROM audit_entries ORDER BY seq`)
+	if err != nil {
+		return fmt.Errorf("postgres: read audit: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		e, err := scanAudit(rows)
+		if err != nil {
+			return err
+		}
+		if err := fn(e); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// LastAudit implements Store.
+func (p *Postgres) LastAudit(ctx context.Context) (audit.Entry, bool, error) {
+	e, err := scanAudit(p.pool.QueryRow(ctx, `SELECT `+auditColumns+` FROM audit_entries ORDER BY seq DESC LIMIT 1`))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return audit.Entry{}, false, nil
+	}
+	if err != nil {
+		return audit.Entry{}, false, fmt.Errorf("postgres: last audit: %w", err)
+	}
+	return e, true, nil
 }
 
 // ListAudit implements Store. Filters become $n parameters, never pasted
@@ -149,8 +217,7 @@ func (p *Postgres) ListAudit(ctx context.Context, f audit.Filter) ([]audit.Entry
 		add("time < $%d", f.Until)
 	}
 
-	query := `SELECT id, time, agent_id, owner_id, tool, params_hash, summary, level, decision, rule,
-		outcome, approval_id, receipt_id, detail FROM audit_entries`
+	query := `SELECT ` + auditColumns + ` FROM audit_entries`
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -165,14 +232,10 @@ func (p *Postgres) ListAudit(ctx context.Context, f audit.Filter) ([]audit.Entry
 
 	var out []audit.Entry
 	for rows.Next() {
-		var e audit.Entry
-		var level, decision, outcome string
-		if err := rows.Scan(&e.ID, &e.Time, &e.AgentID, &e.OwnerID, &e.Tool, &e.ParamsHash, &e.Summary,
-			&level, &decision, &e.Rule, &outcome, &e.ApprovalID, &e.ReceiptID, &e.Detail); err != nil {
+		e, err := scanAudit(rows)
+		if err != nil {
 			return nil, err
 		}
-		e.Time = e.Time.UTC()
-		e.Level, e.Decision, e.Outcome = policy.Level(level), policy.Action(decision), audit.Outcome(outcome)
 		out = append(out, e)
 	}
 	return out, rows.Err()
