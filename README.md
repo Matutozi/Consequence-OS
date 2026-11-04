@@ -35,9 +35,43 @@ All of these, written out, are in [examples/policies.yaml](examples/policies.yam
 
 ## Install
 
-- **Docker:** `ghcr.io/matutozi/consequence-os`, for amd64 and arm64, published from the first release onward. Mount your `consequence.yaml` at `/etc/consequenceos/consequence.yaml`, with `listen: "0.0.0.0:8080"` so the port is reachable from outside the container; see [deploy/consequence.docker.yaml](deploy/consequence.docker.yaml).
+- **Docker:** `ghcr.io/matutozi/consequence-os`, for amd64 and arm64. See [Run with Docker](#run-with-docker) below.
 - **Binaries:** download `consequenced` for Linux or macOS from [Releases](https://github.com/Matutozi/Consequence-OS/releases), and check it against `SHA256SUMS`.
 - **From source:** with Go 1.27 or newer, run `go install github.com/matutozi/consequence-os/cmd/consequenced@latest`, or clone the repo and follow the quickstart.
+
+## Run with Docker
+
+You need Docker and `openssl`. You'll create two files, `consequence.env` (secrets) and `consequence.yaml` (the config), then start the container.
+
+```bash
+# 1. Secrets: receipt signing keys from the image itself, plus random API keys.
+docker run --rm ghcr.io/matutozi/consequence-os -genkeys > consequence.env
+for v in CONSEQUENCE_ADMIN_TOKEN CONSEQUENCE_KEY_SUPPORT_BOT CONSEQUENCE_KEY_RECEIVER_PAYMENTS; do
+  echo "$v=$(openssl rand -hex 32)" >> consequence.env
+done
+
+# 2. A config to start from. Edit it: set upstream to your MCP server, and
+#    list your agents, approvers, receivers and rules.
+curl -sSfLo consequence.yaml https://raw.githubusercontent.com/Matutozi/Consequence-OS/main/consequence.yaml
+
+# 3. Check the config, then start the server.
+docker run --rm --env-file consequence.env \
+  -v "$PWD/consequence.yaml:/etc/consequenceos/consequence.yaml:ro" \
+  ghcr.io/matutozi/consequence-os -check
+
+docker run -d --name consequenceos -p 8080:8080 --env-file consequence.env \
+  -v "$PWD/consequence.yaml:/etc/consequenceos/consequence.yaml:ro" \
+  ghcr.io/matutozi/consequence-os
+
+curl localhost:8080/healthz   # ok
+```
+
+Agents now connect to `http://<this host>:8080/mcp`. Some things to know:
+
+- **Listen address:** the image listens on `0.0.0.0:8080` whatever the config's `listen` says. Change it with `-e CONSEQUENCE_LISTEN=…` or the `-listen` flag.
+- **Upstream address:** inside the container, `127.0.0.1` is the container itself. Point `upstream` at an address the container can reach, such as the tool server's host name.
+- **Approval links:** set `public_url` to the address approvers will open, for example `https://consequence.acme.example`. Otherwise links point at `localhost`.
+- **Storage:** without `database_url_env`, everything is kept in memory and lost on restart. [deploy/consequence.docker.yaml](deploy/consequence.docker.yaml) shows a config with Postgres and email.
 
 ## Quickstart: a held $5,000 refund in under 10 minutes
 
@@ -271,7 +305,7 @@ One YAML file names everything, and secrets live in environment variables that t
 
 | Setting | Meaning |
 |---|---|
-| `listen`, `public_url` | Where to listen, and the base URL used in approval links |
+| `listen`, `public_url` | Where to listen (overridden by `$CONSEQUENCE_LISTEN`, and that by `-listen`), and the base URL used in approval links |
 | `upstream` | The MCP server to forward to |
 | `approval_timeout` | How long a held call waits for a decision before it expires (default `1h`) |
 | `approval_validity` | How long an approval stays usable after it's granted (default `10m`) |

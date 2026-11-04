@@ -6,10 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/mail"
 	"net/url"
 	"os"
-	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -22,6 +22,10 @@ const (
 	DefaultApprovalValidity = 10 * time.Minute
 	DefaultApprovalTimeout  = time.Hour
 	DefaultReceiptTTL       = 5 * time.Minute
+
+	// ListenEnv, when set, overrides the file's listen address. The Docker
+	// image sets it to 0.0.0.0:8080 so the port can be reached from outside.
+	ListenEnv = "CONSEQUENCE_LISTEN"
 )
 
 // Config is the whole of consequence.yaml.
@@ -114,11 +118,17 @@ type LookupEnv func(key string) (string, bool)
 
 // Load reads the config file at path and resolves secrets from the process env.
 func Load(path string) (*Config, error) {
+	return LoadEnv(path, os.LookupEnv)
+}
+
+// LoadEnv is Load with env vars read through lookupEnv, so a caller can
+// layer its own values (such as a -listen flag) over the real environment.
+func LoadEnv(path string, lookupEnv LookupEnv) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	cfg, err := Parse(data, os.LookupEnv)
+	cfg, err := Parse(data, lookupEnv)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -137,6 +147,9 @@ func Parse(data []byte, lookupEnv LookupEnv) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	if v, ok := lookupEnv(ListenEnv); ok && v != "" {
+		cfg.Listen = v // the environment wins over the file
+	}
 	cfg.applyDefaults()
 	if err := cfg.resolveSecrets(lookupEnv); err != nil {
 		return nil, err
@@ -161,12 +174,22 @@ func (c *Config) applyDefaults() {
 		c.Receipts.TTL = DefaultReceiptTTL
 	}
 	if c.PublicURL == "" {
-		host := c.Listen
-		if strings.HasPrefix(host, ":") { // ":8080" listens on every interface
-			host = "localhost" + host
-		}
-		c.PublicURL = "http://" + host
+		c.PublicURL = defaultPublicURL(c.Listen)
 	}
+}
+
+// defaultPublicURL turns a listen address into a URL for approval links.
+// Listening on every interface (":8080", "0.0.0.0:8080", "[::]:8080") has
+// no address a browser can use, so those links point at localhost.
+func defaultPublicURL(listen string) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return "http://" + listen // validate reports the bad address
+	}
+	if ip := net.ParseIP(host); host == "" || ip != nil && ip.IsUnspecified() {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 func (c *Config) resolveSecrets(lookupEnv LookupEnv) error {
@@ -234,6 +257,9 @@ func resolveKey(kind, id, env string, dest *string, lookupEnv LookupEnv) error {
 }
 
 func (c *Config) validate() error {
+	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
+		return fmt.Errorf("listen %q must look like 127.0.0.1:8080 or 0.0.0.0:8080", c.Listen)
+	}
 	if err := validateUpstream(c.Upstream); err != nil {
 		return err
 	}

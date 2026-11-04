@@ -62,6 +62,8 @@ func TestRun(t *testing.T) {
 		{"small po from unknown supplier", []string{"-config", path, "-tool", "purchase_order.confirm", "-args", `{"amount":120,"supplier":"Someone Else"}`}, "action=ask rule=default", ""},
 		{"bad args", []string{"-config", path, "-tool", "notes.read", "-args", "[1]"}, "", "JSON object"},
 		{"missing config", []string{"-config", "/does/not/exist.yaml"}, "", "read config"},
+		{"-listen overrides the file", []string{"-config", path, "-listen", "0.0.0.0:9999", "-check"}, "listen:            0.0.0.0:9999\n  public URL:        http://localhost:9999", ""},
+		{"-listen is checked", []string{"-config", path, "-listen", "nonsense", "-check"}, "", `listen "nonsense" must look like`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -130,5 +132,24 @@ func TestVersionFlag(t *testing.T) {
 	}
 	if got := out.String(); got != "consequenced dev\n" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestListenFlagBeatsEnv(t *testing.T) {
+	path := writeTestConfig(t, "")
+	t.Setenv("CONSEQUENCE_LISTEN", "0.0.0.0:7000")
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-config", path, "-check"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "listen:            0.0.0.0:7000") {
+		t.Errorf("env var ignored: %s", out.String())
+	}
+	out.Reset()
+	if err := run(context.Background(), []string{"-config", path, "-listen", "127.0.0.1:7001", "-check"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "listen:            127.0.0.1:7001") {
+		t.Errorf("flag didn't beat the env var: %s", out.String())
 	}
 }

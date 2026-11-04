@@ -256,3 +256,40 @@ func TestShippedConfigsLoad(t *testing.T) {
 		})
 	}
 }
+
+func TestListenOverrideAndPublicURL(t *testing.T) {
+	yml := validYAML + "listen: \"127.0.0.1:8080\"\n"
+	tests := []struct {
+		name, envListen, wantListen, wantPublic string
+	}{
+		{"file value", "", "127.0.0.1:8080", "http://127.0.0.1:8080"},
+		{"env wins over the file", "0.0.0.0:9000", "0.0.0.0:9000", "http://localhost:9000"},
+		{"all interfaces, no host", ":7000", ":7000", "http://localhost:7000"},
+		{"all IPv6 interfaces", "[::]:7000", "[::]:7000", "http://localhost:7000"},
+		{"a specific IPv6 address", "[::1]:7000", "[::1]:7000", "http://[::1]:7000"},
+		{"a host name", "proxy.internal:7000", "proxy.internal:7000", "http://proxy.internal:7000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := baseEnv(map[string]string{"KEY_SUPPORT": "k", ListenEnv: tt.envListen})
+			cfg, err := Parse([]byte(yml), env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Listen != tt.wantListen || cfg.PublicURL != tt.wantPublic {
+				t.Errorf("listen=%q public=%q, want %q and %q", cfg.Listen, cfg.PublicURL, tt.wantListen, tt.wantPublic)
+			}
+		})
+	}
+
+	// An explicit public_url is never replaced.
+	cfg, _ := Parse([]byte(yml+"public_url: https://approvals.acme.example\n"), baseEnv(map[string]string{"KEY_SUPPORT": "k", ListenEnv: "0.0.0.0:8080"}))
+	if cfg.PublicURL != "https://approvals.acme.example" {
+		t.Errorf("public_url = %q", cfg.PublicURL)
+	}
+
+	if _, err := Parse([]byte(validYAML), baseEnv(map[string]string{"KEY_SUPPORT": "k", ListenEnv: "8080"})); err == nil ||
+		!strings.Contains(err.Error(), `listen "8080" must look like`) {
+		t.Errorf("a listen address without a port: err = %v", err)
+	}
+}
