@@ -1,0 +1,119 @@
+# Example policies for different kinds of agent actions. ConsequenceOS
+# doesn't know what a tool does: it only sees the tool's name and its
+# arguments, so the same rules work for any MCP tool. Copy what fits into
+# your own consequence.yaml; the tool and argument names here are examples.
+#
+# Check this file with:
+#   go run ./cmd/consequenced -config examples/policies.yaml -check
+# (it needs the env vars named below; `make env` then `source .env` sets them).
+
+upstream: "http://127.0.0.1:9090/mcp"
+admin_token_env: CONSEQUENCE_ADMIN_TOKEN
+receipts:
+  ed25519_key_env: CONSEQUENCE_SIGNING_KEY_ED25519
+  mldsa87_key_env: CONSEQUENCE_SIGNING_KEY_MLDSA87
+owners:
+  - id: acme
+    approvers: [ada@acme.example]
+agents:
+  - id: ops-bot
+    owner_id: acme
+    api_key_env: CONSEQUENCE_KEY_SUPPORT_BOT
+
+# How serious each tool is. Unlisted tools count as irreversible, and with
+# no matching rule, read tools are allowed and everything else asks.
+tools:
+  db.query: read
+  db.delete_rows: irreversible
+  db.drop_table: irreversible
+  github.list_pull_requests: read
+  github.create_issue: reversible
+  github.merge_pull_request: irreversible
+  email.send: irreversible
+  k8s.get_pods: read
+  k8s.scale_deployment: reversible
+  k8s.delete_namespace: irreversible
+  crm.update_contact: reversible
+  files.delete: irreversible
+  payments.refund: irreversible
+
+rules:
+  # --- Databases ---------------------------------------------------------
+  - name: never-drop-tables
+    tool: db.drop_table
+    action: deny
+  - name: no-deletes-in-production
+    tool: db.delete_rows
+    when: { arg: environment, op: eq, value: production }
+    action: deny
+  - name: small-deletes-in-staging
+    tool: db.delete_rows
+    when:
+      - { arg: environment, op: eq, value: staging }
+      - { arg: max_rows, op: lte, value: 100 }
+    action: allow
+
+  # --- Code and repositories ---------------------------------------------
+  - name: merges-to-critical-repos-need-review
+    tool: github.merge_pull_request
+    when: { arg: repo, op: in, value: [acme/api, acme/billing] }
+    action: ask
+  - name: other-merges
+    tool: github.merge_pull_request
+    action: allow
+  - name: issue-spam-guard
+    tool: github.create_issue
+    limit: { max: 20, per: 1h }
+    action: ask
+  - name: issues
+    tool: github.create_issue
+    action: allow
+
+  # --- Email and messages ------------------------------------------------
+  - name: email-at-night-asks
+    tool: email.send
+    outside: { hours: "08:00-20:00", timezone: Africa/Lagos }
+    action: ask
+  - name: email-blast-cap
+    tool: email.send
+    limit: { max: 50, per: 1h }
+    action: ask
+  - name: email-to-few-recipients
+    tool: email.send
+    when: { arg: recipient_count, op: lte, value: 5 }
+    action: allow
+
+  # --- Infrastructure ----------------------------------------------------
+  - name: never-delete-namespaces
+    tool: k8s.delete_namespace
+    action: deny
+  - name: scaling-outside-office-hours
+    tool: k8s.scale_deployment
+    outside: { days: [mon, tue, wed, thu, fri], hours: "09:00-17:00", timezone: Africa/Lagos }
+    action: ask
+  - name: small-scaling
+    tool: k8s.scale_deployment
+    when: { arg: replicas, op: lte, value: 10 }
+    action: allow
+
+  # --- Files -------------------------------------------------------------
+  - name: deleting-files-asks
+    tool: files.delete
+    action: ask
+
+  # --- Money -------------------------------------------------------------
+  - name: refund-daily-total
+    tool: payments.refund
+    limit: { sum: amount, max: 2000, per: 24h }
+    action: ask
+  - name: small-refunds
+    tool: payments.refund
+    when: { arg: amount, op: lte, value: 50 }
+    action: allow
+
+  # --- Anything else ------------------------------------------------------
+  # Globs match whole families of tools.
+  - name: crm-writes-capped
+    tool: crm.*
+    limit: { max: 200, per: 24h }
+    action: ask

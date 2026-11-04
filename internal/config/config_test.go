@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -231,6 +232,26 @@ func TestParseLimitsAndSchedules(t *testing.T) {
 			yml := ok + "rules:\n  - { name: r, tool: x, action: ask, " + tt.rule + " }\n"
 			if _, err := Parse([]byte(yml), env); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("err = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestShippedConfigsLoad keeps the example configs in the repo valid.
+func TestShippedConfigsLoad(t *testing.T) {
+	env := fakeEnv(map[string]string{
+		"CONSEQUENCE_ADMIN_TOKEN": "a", "CONSEQUENCE_SIGNING_KEY_ED25519": "e", "CONSEQUENCE_SIGNING_KEY_MLDSA87": "m",
+		"CONSEQUENCE_KEY_SUPPORT_BOT": "s", "CONSEQUENCE_KEY_RECEIVER_PAYMENTS": "r",
+		"CONSEQUENCE_DATABASE_URL": "postgres://x", "CONSEQUENCE_SMTP_URL": "smtp://mailpit:1025",
+	})
+	for _, path := range []string{"../../consequence.yaml", "../../deploy/consequence.docker.yaml", "../../examples/policies.yaml"} {
+		t.Run(path, func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Parse(data, env); err != nil {
+				t.Errorf("%s: %v", path, err)
 			}
 		})
 	}

@@ -18,7 +18,7 @@ export CONSEQUENCE_SIGNING_KEY_MLDSA87 ?= d981o8Ahw7SPWkniT-C-PSaH-CDeOSX9aZCCf4
 # and drop throwaway databases.
 TEST_DATABASE_URL ?= postgres://postgres:test@127.0.0.1:55432/postgres
 
-.PHONY: run check mock demo demo-approval demo-receipts test test-postgres bench lint env up down logs
+.PHONY: run check mock demo demo-approval demo-receipts test test-postgres bench lint dist env up down logs
 
 run:
 	go run ./cmd/consequenced -config $(CONFIG)
@@ -51,6 +51,12 @@ test-postgres:
 # What the proxy adds to a call: compare AllowedCall with UpstreamDirect.
 bench:
 	go test -run '^$$' -bench . -benchmem ./internal/proxy/
+
+# Release archives for every platform, as the release workflow builds them.
+# VERSION defaults to a snapshot name; tags like v0.1.0 are for real releases.
+VERSION ?= v0.0.0-snapshot
+dist:
+	./scripts/build-release.sh $(VERSION)
 
 lint:
 	go vet ./...

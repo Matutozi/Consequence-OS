@@ -13,6 +13,32 @@
 
 Approval gateways already hold calls for a human, but the receiving service never sees that approval. ConsequenceOS gives the receiver proof it can check: the call carries a receipt saying which rule or which named person allowed exactly this action.
 
+## What it can guard
+
+Any action an agent takes through an MCP tool. ConsequenceOS doesn't know what a tool does: rules match the tool's name (globs allowed), its arguments, how much the agent has already done, and the time.
+
+| Kind of action | Example rule |
+|---|---|
+| Databases | Deny `db.delete_rows` when `environment` is `production` |
+| Code | Ask before `github.merge_pull_request` into `acme/api` |
+| Email | Ask once `email.send` passes 50 messages an hour |
+| Infrastructure | Ask before `k8s.scale_deployment` outside office hours |
+| Money | Allow refunds up to $50, and ask once a day's total passes $2,000 |
+
+All of these, written out, are in [examples/policies.yaml](examples/policies.yaml). The quickstart below uses refunds only because they're easy to picture.
+
+## Guides
+
+- [Connecting an agent](docs/agents.md): point an MCP client at ConsequenceOS, and handle allowed, blocked and held calls. There's a runnable [Python agent example](examples/python-agent/agent.py).
+- [Protecting a tool server](docs/receivers.md): refuse calls without a valid receipt, in Go, Python or any language.
+- [Policy](#policy) and [configuration](#configuration) are below.
+
+## Install
+
+- **Docker:** `ghcr.io/matutozi/consequence-os`, for amd64 and arm64, published from the first release onward. Mount your `consequence.yaml` at `/etc/consequenceos/consequence.yaml`, with `listen: "0.0.0.0:8080"` so the port is reachable from outside the container; see [deploy/consequence.docker.yaml](deploy/consequence.docker.yaml).
+- **Binaries:** download `consequenced` for Linux or macOS from [Releases](https://github.com/Matutozi/Consequence-OS/releases), and check it against `SHA256SUMS`.
+- **From source:** with Go 1.27 or newer, run `go install github.com/matutozi/consequence-os/cmd/consequenced@latest`, or clone the repo and follow the quickstart.
+
 ## Quickstart: a held $5,000 refund in under 10 minutes
 
 You need Docker (with Compose), `git`, `curl` and `make`.
@@ -291,6 +317,20 @@ cd python && python -m venv .venv && . .venv/bin/activate && pip install -e '.[t
 CI runs `make lint`, all the Go tests with the race detector (including the Postgres store tests), the Python tests on Python 3.11 and 3.14, and a Docker build, on every push to `main` and every pull request.
 
 **Overhead.** On a 2017 laptop CPU (i7-7820HQ), the proxy adds about 1.5 ms to an allowed call. Most of that is signing the receipt with both keys. A denied call takes about 0.05 ms, because it never reaches the upstream. These figures use the in-memory store; with Postgres, each call also waits for one audit write.
+
+### Releasing
+
+Push a version tag:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The [release workflow](.github/workflows/release.yml) runs the tests, then:
+- publishes a GitHub Release with binaries for Linux and macOS (amd64 and arm64) and `SHA256SUMS`;
+- pushes the image to `ghcr.io/matutozi/consequence-os` as `0.1.0`, `0.1` and `latest`.
+
+A tag with a hyphen, like `v0.2.0-rc.1`, becomes a pre-release and doesn't move `latest`. `make dist` builds the same archives locally.
 
 `make test-postgres` needs a Postgres where the tests may create and drop databases. For example:
 

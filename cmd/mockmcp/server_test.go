@@ -105,6 +105,9 @@ func TestServer(t *testing.T) {
 				if _, has := r["resultType"]; has {
 					t.Error("legacy result should not carry resultType")
 				}
+				if _, has := r["ttlMs"]; has {
+					t.Error("legacy result should not carry ttlMs")
+				}
 			},
 		},
 		{
@@ -121,6 +124,9 @@ func TestServer(t *testing.T) {
 				if r["resultType"] != "complete" || r["supportedVersions"] == nil {
 					t.Errorf("bad discover result: %v", r)
 				}
+				if r["ttlMs"] != 0.0 || r["cacheScope"] != "private" {
+					t.Errorf("discover needs ttlMs and cacheScope: %v", r)
+				}
 				meta := r["_meta"].(map[string]any)
 				if meta[metaServerInfo] == nil {
 					t.Error("missing serverInfo in _meta")
@@ -134,6 +140,9 @@ func TestServer(t *testing.T) {
 				first := r["tools"].([]any)[0].(map[string]any)
 				if first["name"] != "notes.read" || first["inputSchema"] == nil {
 					t.Errorf("unexpected first tool: %v", first)
+				}
+				if r["ttlMs"] != 0.0 || r["cacheScope"] != "private" {
+					t.Errorf("tools/list needs ttlMs and cacheScope: %v", r)
 				}
 			},
 		},
