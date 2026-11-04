@@ -131,7 +131,22 @@ func (i *Issuer) Issue(in Input) ([]byte, verify.Receipt, error) {
 }
 
 func (i *Issuer) sign(r verify.Receipt) ([]byte, error) {
-	raw, err := json.Marshal(r)
+	return i.keys.signJSON(r, verify.MediaType)
+}
+
+// SignAuditHead signs a statement that the audit log's entry seq has hash,
+// under the audit-head type (see verify.AuditHead).
+func (k *Keys) SignAuditHead(issuer string, seq int64, hash string, at time.Time) ([]byte, error) {
+	return k.signJSON(verify.AuditHead{
+		Type: verify.AuditHeadType, Issuer: issuer, Seq: seq, Hash: hash,
+		SignedAt: verify.Timestamp{Time: at.UTC().Truncate(time.Second)},
+	}, verify.AuditHeadMediaType)
+}
+
+// signJSON signs v's canonical JSON with both keys, as a JWS in General
+// JSON Serialization whose protected headers carry typ.
+func (k *Keys) signJSON(v any, typ string) ([]byte, error) {
+	raw, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
@@ -141,17 +156,17 @@ func (i *Issuer) sign(r verify.Receipt) ([]byte, error) {
 	}
 	signed := verify.Signed{Payload: b64.EncodeToString(payload)}
 
-	edHeader, err := protected(verify.AlgEd25519, i.keys.edKid)
+	edHeader, err := protected(typ, verify.AlgEd25519, k.edKid)
 	if err != nil {
 		return nil, err
 	}
-	edSig := ed25519.Sign(i.keys.ed, verify.SigningInput(edHeader, signed.Payload))
+	edSig := ed25519.Sign(k.ed, verify.SigningInput(edHeader, signed.Payload))
 
-	mlHeader, err := protected(verify.AlgMLDSA87, i.keys.mldsaID)
+	mlHeader, err := protected(typ, verify.AlgMLDSA87, k.mldsaID)
 	if err != nil {
 		return nil, err
 	}
-	mlSig, err := i.keys.mldsa.Sign(nil, verify.SigningInput(mlHeader, signed.Payload), nil)
+	mlSig, err := k.mldsa.Sign(nil, verify.SigningInput(mlHeader, signed.Payload), nil)
 	if err != nil {
 		return nil, fmt.Errorf("receipt: ML-DSA-87 sign: %w", err)
 	}
@@ -164,8 +179,8 @@ func (i *Issuer) sign(r verify.Receipt) ([]byte, error) {
 	return json.Marshal(signed)
 }
 
-func protected(alg, kid string) (string, error) {
-	raw, err := json.Marshal(verify.ProtectedHeader{Typ: verify.MediaType, Alg: alg, Kid: kid})
+func protected(typ, alg, kid string) (string, error) {
+	raw, err := json.Marshal(verify.ProtectedHeader{Typ: typ, Alg: alg, Kid: kid})
 	if err != nil {
 		return "", err
 	}

@@ -5,6 +5,7 @@
 //	consequenced -check                              validate config, print a summary, exit
 //	consequenced -tool payments.refund -args '{...}' show the policy decision for one call
 //	             [-at 2026-11-02T22:00:00Z]          ...as if made at that time
+//	consequenced -verify-audit                       check the stored audit log's hash chain
 //	consequenced -genkeys                            print fresh receipt signing keys
 //	consequenced -version                            print the version
 package main
@@ -62,6 +63,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	at := fs.String("at", "", "for -tool: decide as if the call came at this RFC 3339 time (default now)")
 	genKeys := fs.Bool("genkeys", false, "print fresh receipt signing keys as env var lines and exit")
 	showVersion := fs.Bool("version", false, "print the version and exit")
+	verifyAudit := fs.Bool("verify-audit", false, "check the stored audit log's hash chain and exit; fails if it was tampered with")
+	auditHead := fs.String("audit-head", "", "with -verify-audit: a signed head saved from GET /v1/audit/head; the log must still contain it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -83,6 +86,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 
 	switch {
+	case *verifyAudit:
+		return checkAuditChain(ctx, out, cfg, *auditHead)
 	case *tool != "":
 		return explain(out, engine, *tool, *toolArgs, *at)
 	case *check:
@@ -158,6 +163,11 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 	mux.HandleFunc("GET /approvals/{id}", pages.Page)
 	mux.HandleFunc("POST /approvals/{id}/decide", pages.Decide)
 	mux.Handle("GET /v1/audit", audit.Handler(st, cfg.AdminToken, log))
+	mux.Handle("GET /v1/audit/verify", audit.VerifyHandler(st, cfg.AdminToken, log))
+	signHead := func(seq int64, hash string) ([]byte, error) {
+		return keys.SignAuditHead(cfg.PublicURL, seq, hash, time.Now())
+	}
+	mux.Handle("GET /v1/audit/head", audit.HeadHandler(st, signHead, cfg.AdminToken, log))
 	mux.Handle("POST "+verify.VerifyPath, receipt.VerifyHandler(checker, cfg.ReceiverKeys(), log))
 	if len(cfg.Receivers) == 0 {
 		log.Warn("no receivers configured: " + verify.VerifyPath + " refuses every call; receivers can still verify offline")
@@ -194,6 +204,75 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 		}
 		return nil
 	}
+}
+
+// checkAuditChain verifies the stored audit log and prints the result. A
+// broken chain is an error, so scripts and cron jobs can alert on the exit code.
+func checkAuditChain(ctx context.Context, out io.Writer, cfg *config.Config, headFile string) error {
+	if cfg.DatabaseURL == "" {
+		return errors.New("-verify-audit needs database_url_env: the in-memory store keeps no log between runs")
+	}
+	var v audit.ChainVerifier
+	if headFile != "" {
+		head, err := loadSavedHead(cfg, headFile)
+		if err != nil {
+			return err
+		}
+		v.ExpectHead(head.Seq, head.Hash)
+		fmt.Fprintf(out, "saved head: entry %d, signed %s\n", head.Seq, head.SignedAt.Format(time.RFC3339))
+	}
+	st, err := store.OpenPostgres(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	r, err := audit.VerifyChainWith(ctx, st, &v)
+	if err != nil {
+		return err
+	}
+	if !r.Intact {
+		where := ""
+		if r.BrokenAt != "" {
+			where = " at entry " + r.BrokenAt
+		}
+		fmt.Fprintf(out, "audit chain BROKEN%s: %s\n  %d entries checked before it\n", where, r.Problem, r.Checked)
+		return errors.New("the audit log has been changed")
+	}
+	fmt.Fprintf(out, "audit chain intact: %d entries checked", r.Checked)
+	if r.Unhashed > 0 {
+		fmt.Fprintf(out, ", %d older entries from before chaining", r.Unhashed)
+	}
+	if r.Checked > 0 {
+		fmt.Fprintf(out, "\n  head: entry %d, %s", r.HeadSeq, r.HeadHash)
+	}
+	fmt.Fprintln(out)
+	return nil
+}
+
+// loadSavedHead reads a signed head and checks its signatures with this
+// server's keys, so a forged head can't vouch for a rewritten log.
+func loadSavedHead(cfg *config.Config, path string) (*verify.AuditHead, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := receipt.LoadKeys(cfg.Receipts.Ed25519Key, cfg.Receipts.MLDSA87Key)
+	if err != nil {
+		return nil, err
+	}
+	jwks, err := json.Marshal(keys.JWKS())
+	if err != nil {
+		return nil, err
+	}
+	set, err := verify.ParseJWKS(jwks)
+	if err != nil {
+		return nil, err
+	}
+	head, err := verify.VerifyAuditHead(data, set)
+	if err != nil {
+		return nil, fmt.Errorf("saved head %s: %w", path, err)
+	}
+	return head, nil
 }
 
 // newNotifier emails approvers when email is configured; otherwise it logs

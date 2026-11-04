@@ -376,6 +376,7 @@ func TestAuditEntryContents(t *testing.T) {
 		ParamsHash: e.ParamsHash, Summary: "payments.refund with amount, charge_id",
 		Level: policy.LevelIrreversible, Decision: policy.ActionAsk, Rule: "big-refunds", Outcome: audit.OutcomeHeld,
 		ApprovalID: e.ApprovalID,
+		Seq:        1, PrevHash: "", Hash: e.Hash, // the first entry in the chain
 	}
 	if e != want {
 		t.Errorf("entry = %+v\nwant    %+v", e, want)

@@ -389,3 +389,54 @@ func draftContentProblem(v any, depth int) string {
 	}
 	return "value of type " + strings.TrimPrefix(fmt.Sprintf("%T", v), "*") + " is not allowed"
 }
+
+func TestAuditHeadSigning(t *testing.T) {
+	h := newHarness(t)
+	jwks, _ := json.Marshal(h.keys.JWKS())
+	keys, err := verify.ParseJWKS(jwks) // what an auditor gets from /.well-known/consequence-keys
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := h.keys.SignAuditHead("http://cos.test", 42, "sha256:"+strings.Repeat("ab", 32), testStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	head, err := verify.VerifyAuditHead(signed, keys)
+	if err != nil {
+		t.Fatalf("VerifyAuditHead: %v", err)
+	}
+	if head.Seq != 42 || head.Issuer != "http://cos.test" || !head.SignedAt.Equal(testStart) {
+		t.Errorf("head = %+v", head)
+	}
+
+	// A head is not a receipt, and a receipt is not a head.
+	if _, err := verify.VerifyOffline(signed, keys, testStart); !errors.Is(err, verify.ErrMalformed) {
+		t.Errorf("head accepted as a receipt: %v", err)
+	}
+	if _, err := verify.VerifyAuditHead(h.issue(t, ""), keys); !errors.Is(err, verify.ErrMalformed) {
+		t.Errorf("receipt accepted as a head: %v", err)
+	}
+
+	// A changed payload fails the signatures.
+	var s verify.Signed
+	_ = json.Unmarshal(signed, &s)
+	forged, _ := json.Marshal(verify.AuditHead{Type: verify.AuditHeadType, Issuer: "http://cos.test", Seq: 41,
+		Hash: head.Hash, SignedAt: head.SignedAt})
+	canonical, _ := verify.Canonicalize(forged)
+	s.Payload = b64.EncodeToString(canonical)
+	tampered, _ := json.Marshal(s)
+	if _, err := verify.VerifyAuditHead(tampered, keys); !errors.Is(err, verify.ErrBadSignature) {
+		t.Errorf("forged head: err = %v, want ErrBadSignature", err)
+	}
+
+	// The head fits the IETF draft's content rules too.
+	payload, _ := b64.DecodeString(s.Payload)
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.UseNumber()
+	var v any
+	_ = dec.Decode(&v)
+	if problem := draftContentProblem(v, 1); problem != "" {
+		t.Error(problem)
+	}
+}

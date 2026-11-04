@@ -17,10 +17,15 @@ import (
 
 // Store is everything the server persists. It grows as stages add receipts.
 type Store interface {
-	// AppendAudit saves an entry, assigning an ID if it has none, and returns it.
+	// AppendAudit saves an entry, assigning an ID if it has none, and links
+	// it into the hash chain. Appends are serialized, so the chain has no forks.
 	AppendAudit(ctx context.Context, e audit.Entry) (audit.Entry, error)
 	// ListAudit returns matching entries, newest first.
 	ListAudit(ctx context.Context, f audit.Filter) ([]audit.Entry, error)
+	// ForEachAudit calls fn with every entry, oldest first, for checking the chain.
+	audit.Walker
+	// LastAudit returns the newest entry, or ok=false when the log is empty.
+	LastAudit(ctx context.Context) (e audit.Entry, ok bool, err error)
 
 	// An interface can embed another: Store includes every approval method.
 	approval.Repository
@@ -97,8 +102,41 @@ func (m *Memory) AppendAudit(_ context.Context, e audit.Entry) (audit.Entry, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock() // defer runs when the function returns, so the lock is always released
+	prev := ""
+	if n := len(m.audit); n > 0 {
+		prev = m.audit[n-1].Hash
+	}
+	e, err := audit.Chain(prev, e)
+	if err != nil {
+		return audit.Entry{}, err
+	}
+	e.Seq = int64(len(m.audit) + 1)
 	m.audit = append(m.audit, e)
 	return e, nil
+}
+
+// ForEachAudit implements audit.Walker. It works on a copy, so fn may take
+// its time without holding up appends.
+func (m *Memory) ForEachAudit(_ context.Context, fn func(audit.Entry) error) error {
+	m.mu.Lock()
+	entries := append([]audit.Entry(nil), m.audit...)
+	m.mu.Unlock()
+	for _, e := range entries {
+		if err := fn(e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LastAudit implements Store.
+func (m *Memory) LastAudit(context.Context) (audit.Entry, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.audit) == 0 {
+		return audit.Entry{}, false, nil
+	}
+	return m.audit[len(m.audit)-1], true, nil
 }
 
 // ListAudit implements Store.

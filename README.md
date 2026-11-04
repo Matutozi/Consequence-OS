@@ -13,6 +13,14 @@
 
 Approval gateways already hold calls for a human, but the receiving service never sees that approval. ConsequenceOS gives the receiver proof it can check: the call carries a receipt saying which rule or which named person allowed exactly this action.
 
+## Principles
+
+- **Authorization is not standing.** Agents hold no credentials for the systems they act on. Every action needs a fresh receipt: single-use, valid for five minutes, and bound to that exact tool and those exact arguments.
+- **Integrity is not validity.** A well-formed, authenticated call still has to pass the policy: allow, ask or deny, with limits, time windows and consequence levels. Requests that could be read two ways are refused before the policy sees them.
+- **A receipt is not custody.** A receipt permits one action and nothing more. The record of every decision lives in a hash-chained audit log that the agent can't touch, and that shows any edit.
+
+ConsequenceOS doesn't detect prompt injection or tell a good instruction from a bad one. It limits what any agent can do, however it was misled.
+
 ## What it can guard
 
 Any action an agent takes through an MCP tool. ConsequenceOS doesn't know what a tool does: rules match the tool's name (globs allowed), its arguments, how much the agent has already done, and the time.
@@ -208,6 +216,34 @@ go run ./cmd/consequenced -tool payments.refund -args '{"amount":5000}'
 # tool=payments.refund level=irreversible action=ask rule=big-refunds
 ```
 
+## Audit log
+
+Every decision is recorded: allowed, blocked, held, approved, declined, expired and rejected calls, each with the rule, the approver and the receipt. Entries hold a hash and a short summary of the arguments, never the raw values.
+
+The log is a **hash chain**. Each entry stores the previous entry's hash, and its own hash covers that link and every field. Editing, deleting or reordering an entry breaks every link after it.
+
+```bash
+# Check the whole chain (admin token needed).
+curl -s localhost:8080/v1/audit/verify -H "Authorization: Bearer $CONSEQUENCE_ADMIN_TOKEN"
+# {"intact": true, "checked": 1234, ...}   or   {"intact": false, "broken_at": "aud_...", "problem": "..."}
+```
+
+A chain alone can't show that its newest entries were removed, or that someone with database access rebuilt it from scratch. For that, **save signed heads**:
+
+```bash
+# Now and then, e.g. daily from cron, save the signed head somewhere the database admin can't change.
+curl -s localhost:8080/v1/audit/head -H "Authorization: Bearer $CONSEQUENCE_ADMIN_TOKEN" > head-$(date +%F).json
+
+# Later: check the chain, and that it still contains a saved head.
+consequenced -verify-audit -audit-head head-2026-11-04.json
+```
+
+A head is signed with the same two keys as receipts, under its own type, so it can't pass as a receipt. Anyone with the public keys can check one, using `verify.VerifyAuditHead` in Go. `-verify-audit` exits with status 1 if anything was changed, so you can run it from cron or CI and alert on failure.
+
+What it doesn't cover:
+- **Entries from before the chain.** Those written before upgrading to a version with the chain have no hashes. Verification counts them as `unhashed` but can't check them.
+- **Rewrites after the last saved head.** The chain's hashes need no key, so someone with database access could rebuild everything after your newest saved head. Everything before it is safe while the head is kept somewhere they can't reach. Save heads often. Forging a head itself needs the signing keys.
+
 ## Receipts
 
 A receipt is a JWS in **General JSON Serialization** over an **RFC 8785 canonical** payload. It carries two signatures, **Ed25519** and post-quantum **ML-DSA-87**, and both must verify. This follows how the [IETF Agent Permission Receipts draft](https://datatracker.ietf.org/doc/draft-izmaylov-agent-permission-receipts/) encodes its records. The draft defines no server-issued receipt, so the payload fields are ConsequenceOS's own:
@@ -297,6 +333,8 @@ The possible reasons are `malformed`, `unknown_key`, `bad_signature`, `not_canon
 | `POST /v1/receipts/verify` | receivers | Full receipt check, including single use. Needs a receiver key |
 | `GET /.well-known/consequence-keys` | receivers | Public keys as JWKS |
 | `GET /v1/audit` | owners | Audit log. Filters: `agent`, `tool`, `decision`, `since`, `until` (RFC 3339), `limit`. Needs the admin token |
+| `GET /v1/audit/verify` | owners | Checks the audit log's hash chain. Needs the admin token |
+| `GET /v1/audit/head` | owners, auditors | The newest audit entry's place and hash, signed. Needs the admin token |
 | `GET /healthz` | operators | Liveness check |
 
 ## Configuration
@@ -389,7 +427,8 @@ This is an early MVP. Built:
 - the Postgres store, the audit log, and Docker;
 - expiry for unanswered approvals, and a cleanup job for used receipts;
 - rate and spending limits, and time-window rules;
-- the FastAPI/Starlette receiver middleware.
+- the FastAPI/Starlette receiver middleware;
+- a hash-chained audit log, with signed heads and a verify command.
 
 Not yet:
 - passkey-signed approvals.
