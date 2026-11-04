@@ -169,8 +169,7 @@ A receipt is a JWS in **General JSON Serialization** over an **RFC 8785 canonica
   "level": "irreversible",
   "policy": "big-refunds",
   "issued_at": "2026-11-02T10:14:00Z",
-  "expires_at": "2026-11-02T10:19:00Z",
-  "single_use": true
+  "expires_at": "2026-11-02T10:19:00Z"
 }
 ```
 

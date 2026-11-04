@@ -76,7 +76,10 @@ func ErrorForReason(code string) error {
 	return fmt.Errorf("receipt rejected (%s)", code)
 }
 
-// Receipt is the signed statement that one exact action was allowed.
+// Receipt is the signed statement that one exact action was allowed. Every
+// receipt works once, so there is no field saying so. The payload holds
+// only strings and objects, which fits the IETF draft's content rules
+// (objects, arrays, strings and non-negative integers; no booleans or null).
 type Receipt struct {
 	Type       string    `json:"type"`
 	ReceiptID  string    `json:"receipt_id"`
@@ -90,7 +93,6 @@ type Receipt struct {
 	Policy     string    `json:"policy"` // the rule that decided
 	IssuedAt   Timestamp `json:"issued_at"`
 	ExpiresAt  Timestamp `json:"expires_at"`
-	SingleUse  bool      `json:"single_use"`
 }
 
 // Action is the exact call the receipt covers.
