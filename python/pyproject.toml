@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]  # 77+ reads the plain SPDX license string below
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "consequence-verify"
+version = "0.1.0"
+description = "FastAPI/Starlette middleware that refuses MCP tool calls without a valid ConsequenceOS receipt"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = [
+    "starlette>=0.40",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "fastapi>=0.115",
+]
+
+[project.urls]
+Homepage = "https://github.com/Matutozi/Consequence-OS"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -197,6 +197,26 @@ Inside your handler, `verify.FromContext(r.Context())` returns the verified rece
 
 The verify endpoint needs a receiver key. Each check uses the receipt up, so without a key anyone could use receipts up before the real receiver sees them. List each receiver under `receivers` in the config, with the env var that holds its key, and give the receiver the same key. With no receivers listed, the endpoint refuses every call. To check without contacting the server, fetch the keys once with `verify.FetchKeys` and use `&verify.Offline{Keys: keys}`. Offline checking can't enforce single use, so keep your own record of used receipt IDs.
 
+### Protecting a receiver in Python
+
+For FastAPI and Starlette, the [`consequence-verify`](python/) package does the same job as the Go middleware:
+
+```bash
+pip install "git+https://github.com/Matutozi/Consequence-OS.git#subdirectory=python"
+```
+
+```python
+from consequence_verify import Client, ReceiptMiddleware, receipt_from
+
+app.add_middleware(
+    ReceiptMiddleware,
+    verifier=Client("http://consequence-os:8080", os.environ["CONSEQUENCE_KEY_RECEIVER_PAYMENTS"]),
+    paths=["/mcp"],
+)
+```
+
+Inside a route, `receipt_from(request)` returns the verified receipt. Like the Go middleware, it also refuses bodies with duplicate or case-variant keys. See [python/README.md](python/README.md) for details.
+
 ### Verifying over HTTP
 
 ```bash
@@ -263,7 +283,13 @@ make test-postgres  # store tests against a real Postgres
 make bench          # how much latency the proxy adds
 ```
 
-CI runs `make lint`, all the tests with the race detector (including the Postgres store tests), and a Docker build on every push to `main` and every pull request.
+The Python middleware has its own tests:
+
+```bash
+cd python && python -m venv .venv && . .venv/bin/activate && pip install -e '.[test]' && pytest
+```
+
+CI runs `make lint`, all the Go tests with the race detector (including the Postgres store tests), the Python tests on Python 3.11 and 3.14, and a Docker build, on every push to `main` and every pull request.
 
 **Overhead.** On a 2017 laptop CPU (i7-7820HQ), the proxy adds about 1.5 ms to an allowed call. Most of that is signing the receipt with both keys. A denied call takes about 0.05 ms, because it never reaches the upstream. These figures use the in-memory store; with Postgres, each call also waits for one audit write.
 
@@ -280,6 +306,7 @@ Code layout:
 - `internal/policy`, `internal/approval`, `internal/receipt`, `internal/proxy`, `internal/audit`, `internal/store`: the parts of the server.
 - `internal/store/migrations`: SQL migrations, built into the binary and run at startup.
 - `pkg/verify`: the public library for receivers. It covers canonical JSON, the receipt format, the client, and the middleware.
+- `python/`: the same receiver middleware for FastAPI and Starlette.
 
 ## Status
 
@@ -288,10 +315,10 @@ This is an early MVP. Built:
 - the Go receiver middleware;
 - the Postgres store, the audit log, and Docker;
 - expiry for unanswered approvals, and a cleanup job for used receipts;
-- rate and spending limits, and time-window rules.
+- rate and spending limits, and time-window rules;
+- the FastAPI/Starlette receiver middleware.
 
 Not yet:
-- FastAPI middleware for Python receivers (until then, Python services can call `POST /v1/receipts/verify`);
 - passkey-signed approvals.
 
 ## License
