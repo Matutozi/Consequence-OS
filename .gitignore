@@ -11,3 +11,5 @@ __pycache__/
 
 # Release archives from scripts/build-release.sh
 /dist/
+
+/docs/roadmap.md
