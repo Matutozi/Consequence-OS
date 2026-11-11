@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"slices"
 	"time"
+
+	"github.com/matutozi/consequence-os/internal/consequence"
 )
 
 // Action is what a rule tells the proxy to do with a call.
@@ -20,16 +22,25 @@ const (
 // DefaultRule is the rule name reported when no configured rule matched.
 const DefaultRule = "default"
 
+// DefaultAllowBelow is the score under which a call no rule matched is
+// allowed; at or above it, the call asks. With the default scores, reads
+// (0) are allowed and everything else (40 and up) asks.
+const DefaultAllowBelow = 20
+
 // Rule matches tool calls by tool name (glob allowed). Everything else it
-// sets must hold too: the argument conditions, the time window, and the limit.
+// sets must hold too: the argument conditions, the consequence conditions,
+// the time window, and the limit.
 type Rule struct {
-	Name    string     `yaml:"name"`
-	Tool    string     `yaml:"tool"`
-	When    Conditions `yaml:"when,omitempty"`    // nil means "no conditions"
-	During  *Schedule  `yaml:"during,omitempty"`  // only inside this window
-	Outside *Schedule  `yaml:"outside,omitempty"` // only outside this window
-	Limit   *Limit     `yaml:"limit,omitempty"`   // only once this call would pass the limit
-	Action  Action     `yaml:"action"`
+	Name string     `yaml:"name"`
+	Tool string     `yaml:"tool"`
+	When Conditions `yaml:"when,omitempty"` // nil means "no conditions"
+	// Consequence holds conditions on the call's assessment, written like
+	// When, with a fact as the arg: { arg: score, op: gte, value: 70 }.
+	Consequence Conditions `yaml:"consequence,omitempty"`
+	During      *Schedule  `yaml:"during,omitempty"`  // only inside this window
+	Outside     *Schedule  `yaml:"outside,omitempty"` // only outside this window
+	Limit       *Limit     `yaml:"limit,omitempty"`   // only once this call would pass the limit
+	Action      Action     `yaml:"action"`
 }
 
 // Call is one tool call to decide on.
@@ -38,29 +49,51 @@ type Call struct {
 	Tool    string
 	Args    map[string]any
 	At      time.Time // when the call arrived; schedules and limits use it
+	// Consequence is what the call would affect. Left unset, the engine
+	// assesses it from the tools map, so it is never taken as harmless.
+	Consequence consequence.Assessment
 }
 
 // Decision is the outcome of evaluating one tool call.
 type Decision struct {
-	Action Action
-	Rule   string // name of the matching rule, or DefaultRule
-	Level  Level
+	Action      Action
+	Rule        string // name of the matching rule, or DefaultRule
+	Level       Level  // derived from the assessment's reversibility
+	Consequence consequence.Assessment
 }
 
 // Engine evaluates rules top to bottom; the first match wins.
 type Engine struct {
-	rules  []Rule
-	levels Levels
+	rules      []Rule
+	levels     Levels
+	static     consequence.Static
+	allowBelow int
+}
+
+// Option changes how an engine decides.
+type Option func(*Engine)
+
+// AllowBelow sets the score under which a call no rule matched is allowed.
+// 0 means no call is allowed by default. NewEngine checks the range.
+func AllowBelow(score int) Option {
+	return func(e *Engine) { e.allowBelow = score }
 }
 
 // NewEngine validates the rules and levels and returns an engine.
-func NewEngine(rules []Rule, levels Levels) (*Engine, error) {
+func NewEngine(rules []Rule, levels Levels, opts ...Option) (*Engine, error) {
 	if err := levels.Validate(); err != nil {
 		return nil, err
 	}
 	e := &Engine{
-		rules:  make([]Rule, len(rules)),
-		levels: make(Levels, len(levels)),
+		rules:      make([]Rule, len(rules)),
+		levels:     make(Levels, len(levels)),
+		allowBelow: DefaultAllowBelow,
+	}
+	for _, opt := range opts {
+		opt(e)
+	}
+	if e.allowBelow < 0 || e.allowBelow > consequence.MaxScore {
+		return nil, fmt.Errorf("default_allow_below must be from 0 to %d, not %d", consequence.MaxScore, e.allowBelow)
 	}
 	seen := make(map[string]bool, len(rules))
 	for i, r := range rules {
@@ -77,14 +110,22 @@ func NewEngine(rules []Rule, levels Levels) (*Engine, error) {
 		seen[r.Name] = true
 		e.rules[i] = r
 	}
+	tools := make(map[string]consequence.Reversibility, len(levels))
 	for tool, level := range levels {
 		e.levels[tool] = level
+		tools[tool] = level.Reversibility()
 	}
+	e.static = consequence.NewStatic(tools)
 	return e, nil
 }
 
+// Static is the resolver built from the tools map. The proxy uses it
+// unless it is given another, and the engine falls back on it.
+func (e *Engine) Static() consequence.Static { return e.static }
+
 func copyRule(r Rule) Rule {
 	r.When = append(Conditions(nil), r.When...)
+	r.Consequence = append(Conditions(nil), r.Consequence...)
 	if r.During != nil {
 		d := *r.During
 		r.During = &d
@@ -134,24 +175,37 @@ func validateRule(r *Rule) error {
 			return err
 		}
 	}
-	return r.When.validate()
+	if err := r.When.validate("when"); err != nil {
+		return err
+	}
+	return validateFacts(r.Consequence)
 }
 
 // Decide picks the action for a call. usage answers limit rules and may be
-// nil when no rule has a limit. An error means usage couldn't be counted;
-// the caller must not forward the call.
+// nil when no rule has a limit. An error means the call's assessment is
+// invalid or usage couldn't be counted; the caller must not forward the call.
 func (e *Engine) Decide(ctx context.Context, c Call, usage UsageCounter) (Decision, error) {
-	level := e.levels.For(c.Tool)
+	if c.Consequence.IsZero() {
+		c.Consequence, _ = e.static.Assess(ctx, c.Tool, c.Args) // Static never fails
+	} else if err := c.Consequence.Validate(); err != nil {
+		return Decision{}, err
+	}
+	d := Decision{Level: LevelOf(c.Consequence.Reversibility), Consequence: c.Consequence}
 	for i := range e.rules {
 		matched, err := e.rules[i].matches(ctx, c, usage)
 		if err != nil {
 			return Decision{}, fmt.Errorf("rule %q: %w", e.rules[i].Name, err)
 		}
 		if matched {
-			return Decision{Action: e.rules[i].Action, Rule: e.rules[i].Name, Level: level}, nil
+			d.Action, d.Rule = e.rules[i].Action, e.rules[i].Name
+			return d, nil
 		}
 	}
-	return Decision{Action: defaultAction(level), Rule: DefaultRule, Level: level}, nil
+	d.Action, d.Rule = ActionAsk, DefaultRule
+	if c.Consequence.Score < e.allowBelow {
+		d.Action = ActionAllow
+	}
+	return d, nil
 }
 
 // matches checks the cheap parts first, so usage is only counted when the
@@ -165,6 +219,8 @@ func (r *Rule) matches(ctx context.Context, c Call, usage UsageCounter) (bool, e
 	case r.Outside != nil && r.Outside.contains(c.At):
 		return false, nil
 	case !r.When.matches(c.Args):
+		return false, nil
+	case !r.Consequence.matchFacts(c.Consequence):
 		return false, nil
 	case r.Limit == nil:
 		return true, nil
@@ -226,11 +282,4 @@ func (e *Engine) LongestWindow() time.Duration {
 // LevelFor returns the configured level of a tool.
 func (e *Engine) LevelFor(tool string) Level {
 	return e.levels.For(tool)
-}
-
-func defaultAction(level Level) Action {
-	if level == LevelRead {
-		return ActionAllow
-	}
-	return ActionAsk
 }

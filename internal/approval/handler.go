@@ -240,6 +240,7 @@ var pageTemplate = template.Must(template.New("approval").Parse(`<!doctype html>
   th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); vertical-align:top; overflow-wrap:anywhere; }
   th { width:35%; color:var(--muted); font-weight:500; }
   .meta { color:var(--muted); font-size:.85rem; }
+  .score { margin:0 0 4px; } .reasons { margin:0 0 16px; padding-left:20px; color:var(--muted); }
   .buttons { display:flex; gap:12px; margin-top:20px; }
   button { flex:1; font:inherit; font-weight:600; padding:12px; border-radius:8px; border:0; cursor:pointer; color:#fff; }
   .approve { background:#2b7a4b; } .reject { background:#b2352d; }
@@ -251,6 +252,10 @@ var pageTemplate = template.Must(template.New("approval").Parse(`<!doctype html>
   <h1>Approval request</h1>
   <span class="status {{.Status}}">{{.Status}}</span>
   <p class="sentence">{{.Sentence}}</p>
+  {{if .A.Reasons}}
+  <p class="score">Consequence score <strong>{{.A.Score}}</strong> of 100, because:</p>
+  <ul class="reasons">{{range .A.Reasons}}<li>{{.}}</li>{{end}}</ul>
+  {{end}}
 
   <table>
     <tr><th>Tool</th><td>{{.A.Tool}}</td></tr>

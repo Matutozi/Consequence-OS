@@ -72,6 +72,8 @@ type Approval struct {
 	Summary    string          `json:"summary"`
 	Arguments  json.RawMessage `json:"-"` // canonical JSON, shown to the approver only, never logged
 	Level      policy.Level    `json:"level"`
+	Score      int             `json:"score"`             // consequence score, 0 to 100
+	Reasons    []string        `json:"reasons,omitempty"` // why it scored that, shown to the approver
 	Rule       string          `json:"rule"`
 	Status     Status          `json:"status"`
 	CreatedAt  time.Time       `json:"created_at"`
@@ -97,7 +99,7 @@ func (a Approval) Overdue(now time.Time) bool {
 func (a Approval) AuditEntry(at time.Time, outcome audit.Outcome, detail string) audit.Entry {
 	return audit.Entry{
 		Time: at, AgentID: a.AgentID, OwnerID: a.OwnerID, Tool: a.Tool,
-		ParamsHash: a.ParamsHash, Summary: a.Summary, Level: a.Level, Decision: policy.ActionAsk,
+		ParamsHash: a.ParamsHash, Summary: a.Summary, Level: a.Level, Score: a.Score, Decision: policy.ActionAsk,
 		Rule: a.Rule, Outcome: outcome, ApprovalID: a.ID, Detail: detail,
 	}
 }
@@ -133,6 +135,8 @@ type Request struct {
 	Summary    string
 	Arguments  json.RawMessage // canonical JSON
 	Level      policy.Level
+	Score      int
+	Reasons    []string
 	Rule       string
 }
 
@@ -279,6 +283,8 @@ func (s *Service) open(ctx context.Context, req Request, now time.Time) (Approva
 		Summary:    req.Summary,
 		Arguments:  req.Arguments,
 		Level:      req.Level,
+		Score:      req.Score,
+		Reasons:    req.Reasons,
 		Rule:       req.Rule,
 		Status:     StatusPending,
 		CreatedAt:  now,

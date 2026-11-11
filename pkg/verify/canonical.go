@@ -233,13 +233,32 @@ func formatNumber(n json.Number) (string, error) {
 }
 
 // lessUTF16 orders keys by UTF-16 code units, as RFC 8785 requires. This
-// differs from Go's byte order for characters outside the Basic Multilingual Plane.
+// differs from Go's byte order for characters outside the Basic Multilingual
+// Plane, which UTF-16 writes as surrogate pairs (0xD800 to 0xDFFF) that sort
+// before 0xE000 to 0xFFFF. It compares rune by rune without allocating, since
+// sorting calls it many times for every object hashed or signed.
 func lessUTF16(a, b string) bool {
-	ua, ub := utf16.Encode([]rune(a)), utf16.Encode([]rune(b))
-	for i := 0; i < len(ua) && i < len(ub); i++ {
-		if ua[i] != ub[i] {
-			return ua[i] < ub[i]
+	for a != "" && b != "" {
+		ra, na := utf8.DecodeRuneInString(a)
+		rb, nb := utf8.DecodeRuneInString(b)
+		if ra != rb {
+			ha, la := utf16Units(ra)
+			hb, lb := utf16Units(rb)
+			if ha != hb {
+				return ha < hb
+			}
+			return la < lb
 		}
+		a, b = a[na:], b[nb:]
 	}
-	return len(ua) < len(ub)
+	return a == "" && b != ""
+}
+
+// utf16Units returns r's UTF-16 code units: one, then 0, inside the Basic
+// Multilingual Plane, or a surrogate pair outside it.
+func utf16Units(r rune) (first, second rune) {
+	if r >= 0x10000 {
+		return utf16.EncodeRune(r)
+	}
+	return r, 0
 }

@@ -107,9 +107,9 @@ func TestConditionsYAML(t *testing.T) {
 		{"single mapping", `when: { arg: amount, op: lte, value: 50 }`, 1, ""},
 		{"list", "when:\n  - { arg: amount, op: lte, value: 50 }\n  - { arg: currency, op: in, value: [USD, EUR] }", 2, ""},
 		{"absent", `name: r`, 0, ""},
-		{"empty list", `when: []`, 0, "when list is empty"},
+		{"empty list", `when: []`, 0, "condition list is empty"},
 		{"scalar", `when: always`, 0, "condition or a list"},
-		{"list of scalars", "when:\n  - amount", 0, "each when item"},
+		{"list of scalars", "when:\n  - amount", 0, "each item must be a condition"},
 		{"typo in field", `when: { arg: amount, opp: lte, value: 50 }`, 0, `unknown condition field "opp"`},
 		{"typo in list item", "when:\n  - { arg: amount, op: lte, valeu: 50 }", 0, `unknown condition field "valeu"`},
 	}

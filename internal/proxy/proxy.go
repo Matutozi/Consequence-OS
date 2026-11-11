@@ -21,6 +21,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/approval"
 	"github.com/matutozi/consequence-os/internal/audit"
 	"github.com/matutozi/consequence-os/internal/config"
+	"github.com/matutozi/consequence-os/internal/consequence"
 	"github.com/matutozi/consequence-os/internal/policy"
 	"github.com/matutozi/consequence-os/internal/receipt"
 	"github.com/matutozi/consequence-os/internal/store"
@@ -35,16 +36,20 @@ type Options struct {
 	Agents         []config.Agent
 	AllowedOrigins []string
 	Engine         *policy.Engine
-	Store          store.Store
-	Approvals      *approval.Service
-	Receipts       *receipt.Issuer
-	Log            *slog.Logger
-	Now            func() time.Time // nil means time.Now; tests pass a fixed clock
+	// Resolver assesses each call's consequence before the policy decides.
+	// nil means the engine's own, built from the tools map.
+	Resolver  consequence.Resolver
+	Store     store.Store
+	Approvals *approval.Service
+	Receipts  *receipt.Issuer
+	Log       *slog.Logger
+	Now       func() time.Time // nil means time.Now; tests pass a fixed clock
 }
 
 // Proxy implements http.Handler for the /mcp endpoint.
 type Proxy struct {
 	engine    *policy.Engine
+	resolver  consequence.Resolver
 	store     store.Store
 	approvals *approval.Service
 	receipts  *receipt.Issuer
@@ -64,6 +69,7 @@ func New(opts Options) (*Proxy, error) {
 	}
 	p := &Proxy{
 		engine:    opts.Engine,
+		resolver:  opts.Resolver,
 		store:     opts.Store,
 		approvals: opts.Approvals,
 		receipts:  opts.Receipts,
@@ -77,6 +83,9 @@ func New(opts Options) (*Proxy, error) {
 	}
 	if p.engine == nil || p.store == nil || p.approvals == nil || p.receipts == nil || p.log == nil {
 		return nil, fmt.Errorf("proxy: Engine, Store, Approvals, Receipts and Log are required")
+	}
+	if p.resolver == nil {
+		p.resolver = p.engine.Static()
 	}
 	for _, a := range opts.Agents {
 		// Looking agents up by a hash of the key means we never compare raw
@@ -152,13 +161,24 @@ func (p *Proxy) handleCall(w http.ResponseWriter, r *http.Request, agent config.
 		writeJSON(w, http.StatusBadRequest, errorResponse(msg.id, codeInvalidParams, "arguments could not be hashed"))
 		return
 	}
+	// Assess before taking any lock: a resolver may be slow (a map lookup),
+	// and the assessment doesn't depend on other calls.
+	assessment, err := p.resolver.Assess(r.Context(), call.name, call.args)
+	if err == nil {
+		err = assessment.Validate()
+	}
+	if err != nil {
+		p.log.Error("consequence assessment failed", "tool", call.name, "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, "consequence could not be assessed; call not forwarded"))
+		return
+	}
 	// With limit rules, this agent's calls in each limit scope that covers
 	// this tool go one at a time until the call is recorded, so parallel
 	// calls can't all fit under a limit. No scopes means no locks.
 	release := p.limits.lockAll(agent.ID+"\x00", p.engine.UsageScopes(call.name))
 	defer release()
 
-	pc := policy.Call{AgentID: agent.ID, Tool: call.name, Args: call.args, At: entry.Time}
+	pc := policy.Call{AgentID: agent.ID, Tool: call.name, Args: call.args, At: entry.Time, Consequence: assessment}
 	decision, err := p.engine.Decide(r.Context(), pc, p.store)
 	if err != nil {
 		p.log.Error("policy decision failed", "tool", call.name, "err", err)
@@ -169,6 +189,7 @@ func (p *Proxy) handleCall(w http.ResponseWriter, r *http.Request, agent config.
 	entry.ParamsHash = hash
 	entry.Summary = summarize(call)
 	entry.Level = decision.Level
+	entry.Score = decision.Consequence.Score
 	entry.Decision = decision.Action
 	entry.Rule = decision.Rule
 
@@ -202,6 +223,7 @@ func (p *Proxy) handleAsk(w http.ResponseWriter, r *http.Request, msg message, c
 	res, err := p.approvals.Check(r.Context(), approval.Request{
 		AgentID: entry.AgentID, OwnerID: entry.OwnerID, Tool: entry.Tool, ParamsHash: entry.ParamsHash,
 		Summary: entry.Summary, Arguments: canonical, Level: entry.Level, Rule: entry.Rule,
+		Score: entry.Score, Reasons: pc.Consequence.Reasons,
 	})
 	if errors.Is(err, approval.ErrTooManyPending) {
 		// Refused, not held: holding it would email the approvers yet again.
@@ -334,7 +356,7 @@ func (p *Proxy) record(ctx context.Context, e audit.Entry) error {
 		return err
 	}
 	p.log.Info("decision", "audit_id", saved.ID, "agent", e.AgentID, "tool", e.Tool,
-		"decision", e.Decision, "rule", e.Rule, "outcome", e.Outcome, "params_hash", e.ParamsHash,
+		"decision", e.Decision, "rule", e.Rule, "score", e.Score, "outcome", e.Outcome, "params_hash", e.ParamsHash,
 		"approval_id", e.ApprovalID, "receipt_id", e.ReceiptID)
 	return nil
 }

@@ -9,12 +9,29 @@ import (
 // than their author meant. consequenced -check prints them and the server
 // logs them at startup; they never stop the config from loading.
 //
-// Today there is one kind: a deny or ask rule that depends on text being
+// There are two kinds. First, a deny or ask rule that depends on text being
 // written exactly. "Production", "prod" or "production " skip a rule on
 // "production", and the call goes on to later rules, perhaps to an allow.
 // An allow rule that depends on exact text is fine: a variant fails closed.
+//
+// Second, an allow rule that matches a list fact with eq or in. Those match
+// when any item does, so a call touching public data and payment data is
+// allowed by a rule meant for public data.
 func (e *Engine) Warnings() []string {
 	var warnings []string
+	for _, r := range e.rules {
+		if r.Action != ActionAllow {
+			continue
+		}
+		for _, c := range r.Consequence {
+			if factKinds[c.Arg] == listFact && (c.Op == OpEq || c.Op == OpIn) {
+				warnings = append(warnings, fmt.Sprintf(
+					"rule %q: allow matches %s when any one of them is %s, so a call that also touches others is allowed too. "+
+						"To allow only calls that touch none of the others, use not_in with the ones you don't allow.",
+					r.Name, c.Arg, formatList(c.Value)))
+			}
+		}
+	}
 	for i, r := range e.rules {
 		if r.Action != ActionDeny && r.Action != ActionAsk {
 			continue
@@ -54,12 +71,25 @@ func exactTextArgs(conds Conditions) []string {
 func (e *Engine) laterCatchAllAllow(i int) string {
 	tool := e.rules[i].Tool
 	for _, r := range e.rules[i+1:] {
-		catchAll := len(r.When) == 0 && r.During == nil && r.Outside == nil && r.Limit == nil
+		catchAll := len(r.When) == 0 && len(r.Consequence) == 0 && r.During == nil && r.Outside == nil && r.Limit == nil
 		if catchAll && r.Action == ActionAllow && toolsOverlap(tool, r.Tool) {
 			return r.Name
 		}
 	}
 	return ""
+}
+
+// formatList prints a condition value the way it was written in YAML.
+func formatList(v any) string {
+	items, ok := v.([]any)
+	if !ok {
+		return fmt.Sprint(v)
+	}
+	parts := make([]string, len(items))
+	for i, item := range items {
+		parts[i] = fmt.Sprint(item)
+	}
+	return "in [" + strings.Join(parts, ", ") + "]"
 }
 
 // toolsOverlap reports whether two tool patterns can match the same tool,

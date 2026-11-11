@@ -374,7 +374,7 @@ func TestAuditEntryContents(t *testing.T) {
 		ID: e.ID, Time: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC),
 		AgentID: "support-bot", OwnerID: "acme", Tool: "payments.refund",
 		ParamsHash: e.ParamsHash, Summary: "payments.refund with amount, charge_id",
-		Level: policy.LevelIrreversible, Decision: policy.ActionAsk, Rule: "big-refunds", Outcome: audit.OutcomeHeld,
+		Level: policy.LevelIrreversible, Score: 80, Decision: policy.ActionAsk, Rule: "big-refunds", Outcome: audit.OutcomeHeld,
 		ApprovalID: e.ApprovalID,
 		Seq:        1, PrevHash: "", Hash: e.Hash, // the first entry in the chain
 	}

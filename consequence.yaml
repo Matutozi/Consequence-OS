@@ -6,6 +6,7 @@ upstream: "http://127.0.0.1:9090/mcp"
 approval_validity: 10m   # how long an approval stays usable once granted
 approval_timeout: 1h     # how long a held call waits for a decision
 max_pending_approvals: 20  # per agent; past this, new asks are refused, not emailed
+default_allow_below: 20    # calls no rule matches are allowed when their consequence score is under this
 
 # Token for owner endpoints such as GET /v1/audit.
 admin_token_env: CONSEQUENCE_ADMIN_TOKEN
