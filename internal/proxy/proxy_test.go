@@ -71,6 +71,7 @@ type fixture struct {
 	checker     *receipt.Checker // verifies receipts the way the receiver's server would
 	clock       *time.Time       // tests move time forward by changing *clock
 	approvalLog *syncBuffer      // where the approval service writes approver links
+	opts        Options          // what the proxy was built with
 }
 
 // syncBuffer is a bytes.Buffer that is safe to write from several goroutines.
@@ -141,7 +142,7 @@ func newFixtureWithRules(t testing.TB, st store.Store, rules []policy.Rule) fixt
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := New(Options{
+	opts := Options{
 		Upstream:       srv.URL + "/mcp",
 		Agents:         []config.Agent{{ID: "support-bot", OwnerID: "acme", APIKey: agentKey}},
 		AllowedOrigins: []string{"http://localhost:3000"},
@@ -152,11 +153,12 @@ func newFixtureWithRules(t testing.TB, st store.Store, rules []policy.Rule) fixt
 		Receiver:       "payments-api", // as the shipped configs set it, so receipts are v1
 		Log:            discard,
 		Now:            now,
-	})
+	}
+	p, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fixture{proxy: p, up: up, upstreamURL: srv.URL + "/mcp", store: st, approvals: svc, checker: checker, clock: &clock, approvalLog: approvalLog}
+	return fixture{proxy: p, up: up, upstreamURL: srv.URL + "/mcp", store: st, approvals: svc, checker: checker, clock: &clock, approvalLog: approvalLog, opts: opts}
 }
 
 func call(tool string, args string) string {

@@ -1,13 +1,12 @@
 // Package proxy is Guard 1: it sits between an agent and the upstream MCP
 // server, passes ordinary traffic through untouched, and runs every
-// tools/call, resources/read and prompts/get past the policy engine first.
+// tools/call, resources/read and prompts/get past the gate first.
 package proxy
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +21,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/audit"
 	"github.com/matutozi/consequence-os/internal/config"
 	"github.com/matutozi/consequence-os/internal/consequence"
+	"github.com/matutozi/consequence-os/internal/gate"
 	"github.com/matutozi/consequence-os/internal/policy"
 	"github.com/matutozi/consequence-os/internal/receipt"
 	"github.com/matutozi/consequence-os/internal/store"
@@ -49,20 +49,19 @@ type Options struct {
 	Now      func() time.Time // nil means time.Now; tests pass a fixed clock
 }
 
-// Proxy implements http.Handler for the /mcp endpoint.
+// Proxy implements http.Handler for the /mcp endpoint. It is the HTTP
+// adapter over the gate: it authenticates agents, parses MCP messages,
+// asks the gate about gated calls, words the answer, and forwards allowed
+// calls with a receipt.
 type Proxy struct {
-	engine    *policy.Engine
-	resolver  consequence.Resolver
-	store     store.Store
-	approvals *approval.Service
+	gate      *gate.Gate
+	approvals *approval.Service // for the wording of held and refused calls
 	receipts  *receipt.Issuer
 	receiver  string
 	log       *slog.Logger
-	now       func() time.Time
 	agents    map[[32]byte]config.Agent // keyed by sha256 of the API key
 	origins   map[string]bool
 	rp        *httputil.ReverseProxy
-	limits    keyedLocks // serializes calls covered by limit rules; see locks.go
 }
 
 // New builds a Proxy.
@@ -71,26 +70,24 @@ func New(opts Options) (*Proxy, error) {
 	if err != nil || upstream.Host == "" {
 		return nil, fmt.Errorf("proxy: bad upstream URL %q", opts.Upstream)
 	}
+	if opts.Engine == nil || opts.Store == nil || opts.Approvals == nil || opts.Receipts == nil || opts.Log == nil {
+		return nil, fmt.Errorf("proxy: Engine, Store, Approvals, Receipts and Log are required")
+	}
+	g, err := gate.New(gate.Options{
+		Engine: opts.Engine, Resolver: opts.Resolver, Store: opts.Store,
+		Approvals: opts.Approvals, Log: opts.Log, Now: opts.Now,
+	})
+	if err != nil {
+		return nil, err
+	}
 	p := &Proxy{
-		engine:    opts.Engine,
-		resolver:  opts.Resolver,
-		store:     opts.Store,
+		gate:      g,
 		approvals: opts.Approvals,
 		receipts:  opts.Receipts,
 		receiver:  opts.Receiver,
 		log:       opts.Log,
-		now:       opts.Now,
 		agents:    make(map[[32]byte]config.Agent, len(opts.Agents)),
 		origins:   make(map[string]bool, len(opts.AllowedOrigins)),
-	}
-	if p.now == nil {
-		p.now = time.Now
-	}
-	if p.engine == nil || p.store == nil || p.approvals == nil || p.receipts == nil || p.log == nil {
-		return nil, fmt.Errorf("proxy: Engine, Store, Approvals, Receipts and Log are required")
-	}
-	if p.resolver == nil {
-		p.resolver = p.engine.Static()
 	}
 	for _, a := range opts.Agents {
 		// Looking agents up by a hash of the key means we never compare raw
@@ -145,128 +142,55 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCall decides a gated request. Tool calls and reads take the same
-// path: limits, deny, ask and the audit log all apply to both. Only allowed
-// tool calls get a receipt.
+// path through the gate: limits, deny, ask and the audit log all apply to
+// both. Only allowed tool calls get a receipt.
 func (p *Proxy) handleCall(w http.ResponseWriter, r *http.Request, agent config.Agent, msg message, body []byte) {
-	entry := audit.Entry{Time: p.now().UTC(), AgentID: agent.ID, OwnerID: agent.OwnerID}
-
 	call, rerr := parseCall(msg)
 	if rerr == nil {
 		rerr = checkHeaders(r.Header, msg, &call)
 	}
 	if rerr != nil {
-		entry.Tool, entry.Outcome, entry.Detail = call.name, audit.OutcomeRejected, rerr.message
-		_ = p.record(r.Context(), entry) // best effort: nothing is forwarded either way
+		_ = p.gate.Record(r.Context(), audit.Entry{ // best effort: nothing is forwarded either way
+			AgentID: agent.ID, OwnerID: agent.OwnerID, Tool: call.name, Outcome: audit.OutcomeRejected, Detail: rerr.message,
+		})
 		writeJSON(w, rerr.status, errorResponse(msg.id, rerr.code, rerr.message))
 		return
 	}
 
-	hash, err := verify.ParamsHash(call.rawArgs)
-	if err != nil { // can't happen after parseMessage validated the body, but never forward unhashed
-		writeJSON(w, http.StatusBadRequest, errorResponse(msg.id, codeInvalidParams, "arguments could not be hashed"))
-		return
-	}
-	// Assess before taking any lock: a resolver may be slow (a map lookup),
-	// and the assessment doesn't depend on other calls.
-	assessment, err := p.resolver.Assess(r.Context(), call.name, call.args)
-	if err == nil {
-		err = assessment.Validate()
-	}
-	if err != nil {
-		p.log.Error("consequence assessment failed", "tool", call.name, "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, "consequence could not be assessed; call not forwarded"))
-		return
-	}
-	// With limit rules, this agent's calls in each limit scope that covers
-	// this tool go one at a time until the call is recorded, so parallel
-	// calls can't all fit under a limit. No scopes means no locks.
-	release := p.limits.lockAll(agent.ID+"\x00", p.engine.UsageScopes(call.name))
-	defer release()
-
-	pc := policy.Call{AgentID: agent.ID, Tool: call.name, Args: call.args, At: entry.Time, Consequence: assessment}
-	decision, err := p.engine.Decide(r.Context(), pc, p.store)
-	if err != nil {
-		p.log.Error("policy decision failed", "tool", call.name, "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, "usage limits unavailable; call not forwarded"))
-		return
-	}
-	entry.Tool = call.name
-	entry.ParamsHash = hash
-	entry.Summary = summarize(call)
-	entry.Level = decision.Level
-	entry.Score = decision.Consequence.Score
-	entry.Decision = decision.Action
-	entry.Rule = decision.Rule
-
-	switch decision.Action {
-	case policy.ActionAllow:
-		p.forwardAllowed(w, r, msg, call, pc, entry, "", body, release)
-
-	case policy.ActionDeny:
-		entry.Outcome = audit.OutcomeBlocked
-		_ = p.record(r.Context(), entry) // the call is refused whether or not this succeeds
-		text := fmt.Sprintf("Blocked by ConsequenceOS: policy rule %q does not allow %s. Do not retry this call.", decision.Rule, call.what())
-		refuse(w, msg, call, text)
-
-	default: // ActionAsk
-		p.handleAsk(w, r, msg, call, pc, entry, body, release)
-	}
-}
-
-// handleAsk holds a call until a human approves it, then lets one retry of
-// the exact same call (same agent, tool and argument hash) through.
-func (p *Proxy) handleAsk(w http.ResponseWriter, r *http.Request, msg message, call toolCall, pc policy.Call, entry audit.Entry, body []byte, release func()) {
-	args := call.rawArgs
-	if len(args) == 0 || string(args) == "null" {
-		args = json.RawMessage("{}")
-	}
-	canonical, err := verify.Canonicalize(args)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse(msg.id, codeInvalidParams, "arguments could not be canonicalized"))
-		return
-	}
-	res, err := p.approvals.Check(r.Context(), approval.Request{
-		AgentID: entry.AgentID, OwnerID: entry.OwnerID, Tool: entry.Tool, ParamsHash: entry.ParamsHash,
-		Summary: entry.Summary, Arguments: canonical, Level: entry.Level, Rule: entry.Rule,
-		Score: entry.Score, Reasons: pc.Consequence.Reasons,
+	res, err := p.gate.Decide(r.Context(), gate.Request{
+		AgentID: agent.ID, OwnerID: agent.OwnerID, Name: call.name, RawArgs: call.rawArgs, Args: call.args,
 	})
-	if errors.Is(err, approval.ErrTooManyPending) {
-		// Refused, not held: holding it would email the approvers yet again.
-		entry.Outcome, entry.Detail = audit.OutcomeBlocked, "too many pending approvals"
-		_ = p.record(r.Context(), entry)
-		text := fmt.Sprintf("Refused by ConsequenceOS: this agent already has %d requests waiting for a human to approve, "+
+	if err != nil {
+		p.fail(w, msg, err)
+		return
+	}
+	defer res.Release()
+
+	switch res.Verdict {
+	case gate.Allowed:
+		p.forwardAllowed(w, r, msg, call, res, body)
+
+	case gate.Denied:
+		refuse(w, msg, call, fmt.Sprintf("Blocked by ConsequenceOS: policy rule %q does not allow %s. Do not retry this call.",
+			res.Decision.Rule, call.what()))
+
+	case gate.TooManyPending:
+		refuse(w, msg, call, fmt.Sprintf("Refused by ConsequenceOS: this agent already has %d requests waiting for a human to approve, "+
 			"the most allowed, so %s was not sent for approval. Do not retry it or similar calls now. "+
 			"Tell the user requests are waiting for their decision, and try again after they decide.",
-			p.approvals.MaxPending(), call.what())
-		refuse(w, msg, call, text)
-		return
-	}
-	if err != nil {
-		p.log.Error("approval check failed", "tool", entry.Tool, "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, "approvals unavailable; call not forwarded"))
-		return
-	}
-	a := res.Approval
-	entry.ApprovalID = a.ID
+			p.approvals.MaxPending(), call.what()))
 
-	switch res.State {
-	case approval.StateApproved:
-		p.forwardAllowed(w, r, msg, call, pc, entry, a.DecidedBy, body, release)
+	case gate.Declined:
+		refuse(w, msg, call, fmt.Sprintf("Rejected: an approver declined %s (approval %s). Do not retry it; tell the user it was declined.",
+			call.what(), res.Approval.ID))
 
-	case approval.StateRejected:
-		entry.Outcome = audit.OutcomeDeclined
-		_ = p.record(r.Context(), entry)
-		text := fmt.Sprintf("Rejected: an approver declined %s (approval %s). Do not retry it; tell the user it was declined.", call.what(), a.ID)
-		refuse(w, msg, call, text)
-
-	default: // StatePending
-		entry.Outcome = audit.OutcomeHeld
-		_ = p.record(r.Context(), entry)
+	default: // gate.Held
+		a := res.Approval
 		text := fmt.Sprintf("Approval pending: %s needs a human to approve it (policy rule %q). "+
 			"Approval ID: %s. Status: %s . "+
 			"Tell the user this action is waiting for approval. Once it is approved, retry this exact call "+
 			"with the same arguments within %s; it will then go through once.",
-			call.what(), entry.Rule, a.ID, p.approvals.StatusURL(a.ID), approval.HumanDuration(p.approvals.Validity()))
+			call.what(), res.Decision.Rule, a.ID, p.approvals.StatusURL(a.ID), approval.HumanDuration(p.approvals.Validity()))
 		if !a.ExpiresAt.IsZero() {
 			text += fmt.Sprintf(" If nobody decides by %s, the request expires.", a.ExpiresAt.Format(time.RFC3339))
 		}
@@ -274,62 +198,60 @@ func (p *Proxy) handleAsk(w http.ResponseWriter, r *http.Request, msg message, c
 	}
 }
 
+// fail answers a call the gate could not decide or record. Nothing is
+// forwarded.
+func (p *Proxy) fail(w http.ResponseWriter, msg message, err error) {
+	var gerr *gate.Error
+	switch {
+	case errors.As(err, &gerr) && gerr.BadArguments:
+		writeJSON(w, http.StatusBadRequest, errorResponse(msg.id, codeInvalidParams, gerr.What))
+	case errors.As(err, &gerr):
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, gerr.What+"; call not forwarded"))
+	default:
+		p.log.Error("gate failed", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, "call not forwarded"))
+	}
+}
+
 // forwardAllowed forwards an allowed or approved call. Tool calls carry a
 // receipt; reads don't, because receipts are for actions and receivers
 // check only tools/call.
-func (p *Proxy) forwardAllowed(w http.ResponseWriter, r *http.Request, msg message, call toolCall, pc policy.Call, entry audit.Entry, approvedBy string, body []byte, release func()) {
+func (p *Proxy) forwardAllowed(w http.ResponseWriter, r *http.Request, msg message, call toolCall, res *gate.Result, body []byte) {
 	if call.isTool() {
-		p.forwardWithReceipt(w, r, msg, pc, entry, approvedBy, body, release)
+		p.forwardWithReceipt(w, r, msg, res, body)
 		return
 	}
-	if !p.count(w, r, msg, pc, entry) {
+	if err := res.Admit(r.Context(), ""); err != nil {
+		p.fail(w, msg, err)
 		return
 	}
-	entry.Outcome = audit.OutcomeForwarded
-	if err := p.record(r.Context(), entry); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, "audit log unavailable; call not forwarded"))
-		return
-	}
-	release()
 	p.forward(w, r, body)
 }
 
-// count records the call's usage for every limit scope that covers it. On
-// failure it answers the agent and returns false: nothing goes uncounted.
-func (p *Proxy) count(w http.ResponseWriter, r *http.Request, msg message, pc policy.Call, entry audit.Entry) bool {
-	for _, u := range p.engine.UsageRecords(pc) {
-		if err := p.store.RecordUsage(r.Context(), u); err != nil {
-			p.log.Error("usage write failed", "tool", entry.Tool, "scope", u.Tool, "err", err)
-			writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, "usage log unavailable; call not forwarded"))
-			return false
-		}
-	}
-	return true
-}
-
-// forwardWithReceipt signs a receipt for an allowed or approved call, writes
-// the audit entry, and forwards the call with the receipt attached in both
-// the X-Consequence-Receipt header and params._meta.consequenceReceipt.
-// Any failure stops the call: nothing is forwarded without a receipt and an
-// audit entry. release frees the call's usage lock once usage is recorded.
-func (p *Proxy) forwardWithReceipt(w http.ResponseWriter, r *http.Request, msg message, pc policy.Call, entry audit.Entry, approvedBy string, body []byte, release func()) {
+// forwardWithReceipt signs a receipt for an allowed or approved call, has
+// the gate count and audit it, and forwards the call with the receipt
+// attached in both the X-Consequence-Receipt header and
+// params._meta.consequenceReceipt. Any failure stops the call: nothing is
+// forwarded without a receipt and an audit entry.
+func (p *Proxy) forwardWithReceipt(w http.ResponseWriter, r *http.Request, msg message, res *gate.Result, body []byte) {
 	fail := func(what string) {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, what+"; call not forwarded"))
 	}
+	e := res.Entry
 	in := receipt.Input{
-		AgentID: entry.AgentID, OwnerID: entry.OwnerID, ApprovedBy: approvedBy,
-		Tool: entry.Tool, ParamsHash: entry.ParamsHash, Summary: entry.Summary,
-		Level: string(entry.Level), Policy: entry.Rule,
+		AgentID: e.AgentID, OwnerID: e.OwnerID, ApprovedBy: res.ApprovedBy,
+		Tool: e.Tool, ParamsHash: e.ParamsHash, Summary: e.Summary,
+		Level: string(e.Level), Policy: e.Rule,
 	}
 	if p.receiver != "" {
 		// v1: the receipt names its receiver and says how serious the call is.
-		a := pc.Consequence
+		a := res.Decision.Consequence
 		in.Audience = p.receiver
 		in.Consequence = &verify.Consequence{Score: a.Score, Reversibility: string(a.Reversibility), Source: a.Source, MapHash: a.MapHash}
 	}
 	encoded, rcpt, err := p.receipts.Issue(in)
 	if err != nil {
-		p.log.Error("receipt signing failed", "tool", entry.Tool, "err", err)
+		p.log.Error("receipt signing failed", "tool", e.Tool, "err", err)
 		fail("could not sign a receipt")
 		return
 	}
@@ -338,19 +260,10 @@ func (p *Proxy) forwardWithReceipt(w http.ResponseWriter, r *http.Request, msg m
 		fail("could not attach the receipt")
 		return
 	}
-	// Usage first: if the audit write then fails, a call is over-counted
-	// (the safe way round) rather than forwarded uncounted. Likewise if one
-	// scope's record fails after another's was saved.
-	if !p.count(w, r, msg, pc, entry) {
+	if err := res.Admit(r.Context(), rcpt.ReceiptID); err != nil {
+		p.fail(w, msg, err)
 		return
 	}
-	entry.Outcome = audit.OutcomeForwarded
-	entry.ReceiptID = rcpt.ReceiptID
-	if err := p.record(r.Context(), entry); err != nil {
-		fail("audit log unavailable")
-		return
-	}
-	release() // counted: the next call may be decided while this one runs upstream
 	// The reverse proxy reads the header value from the request context.
 	r = r.WithContext(context.WithValue(r.Context(), receiptKey{}, string(encoded)))
 	p.forward(w, r, withReceipt)
@@ -358,20 +271,6 @@ func (p *Proxy) forwardWithReceipt(w http.ResponseWriter, r *http.Request, msg m
 
 // receiptKey is the context key for the receipt to send upstream.
 type receiptKey struct{}
-
-// record saves an audit entry and logs the decision. Arguments are never
-// logged, only their hash and a summary of which keys were present.
-func (p *Proxy) record(ctx context.Context, e audit.Entry) error {
-	saved, err := p.store.AppendAudit(ctx, e)
-	if err != nil {
-		p.log.Error("audit write failed", "agent", e.AgentID, "tool", e.Tool, "err", err)
-		return err
-	}
-	p.log.Info("decision", "audit_id", saved.ID, "agent", e.AgentID, "tool", e.Tool,
-		"decision", e.Decision, "rule", e.Rule, "score", e.Score, "outcome", e.Outcome, "params_hash", e.ParamsHash,
-		"approval_id", e.ApprovalID, "receipt_id", e.ReceiptID)
-	return nil
-}
 
 func (p *Proxy) authenticate(r *http.Request) (config.Agent, bool) {
 	scheme, key, ok := strings.Cut(r.Header.Get("Authorization"), " ")

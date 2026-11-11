@@ -86,10 +86,16 @@ func (c Conditions) each(field string, check func(Condition) error) error {
 	return nil
 }
 
-// matches reports whether every condition holds. An empty list always matches.
-func (c Conditions) matches(args map[string]any) bool {
+// matches reports whether every condition holds. An empty list always
+// matches. loose also accepts argument names that differ in letter case;
+// see Condition.matchesLoosely.
+func (c Conditions) matches(args map[string]any, loose bool) bool {
 	for _, cond := range c {
-		if !cond.matches(args) {
+		ok := cond.matches(args)
+		if !ok && loose {
+			ok = cond.matchesLoosely(args)
+		}
+		if !ok {
 			return false
 		}
 	}
