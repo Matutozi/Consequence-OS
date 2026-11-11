@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -133,10 +134,10 @@ func (p *Postgres) AppendAudit(ctx context.Context, e audit.Entry) (audit.Entry,
 		}
 		return tx.QueryRow(ctx, `INSERT INTO audit_entries
 			(id, time, agent_id, owner_id, tool, params_hash, summary, level, decision, rule, outcome,
-			 approval_id, receipt_id, detail, prev_hash, hash)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING seq`,
+			 approval_id, receipt_id, detail, prev_hash, hash, score)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING seq`,
 			e.ID, e.Time, e.AgentID, e.OwnerID, e.Tool, e.ParamsHash, e.Summary, string(e.Level), string(e.Decision),
-			e.Rule, string(e.Outcome), e.ApprovalID, e.ReceiptID, e.Detail, e.PrevHash, e.Hash).Scan(&e.Seq)
+			e.Rule, string(e.Outcome), e.ApprovalID, e.ReceiptID, e.Detail, e.PrevHash, e.Hash, e.Score).Scan(&e.Seq)
 	})
 	if err != nil {
 		return audit.Entry{}, fmt.Errorf("postgres: append audit: %w", err)
@@ -145,13 +146,13 @@ func (p *Postgres) AppendAudit(ctx context.Context, e audit.Entry) (audit.Entry,
 }
 
 const auditColumns = `seq, id, time, agent_id, owner_id, tool, params_hash, summary, level, decision, rule,
-	outcome, approval_id, receipt_id, detail, prev_hash, hash`
+	outcome, approval_id, receipt_id, detail, prev_hash, hash, score`
 
 func scanAudit(row pgx.Row) (audit.Entry, error) {
 	var e audit.Entry
 	var level, decision, outcome string
 	err := row.Scan(&e.Seq, &e.ID, &e.Time, &e.AgentID, &e.OwnerID, &e.Tool, &e.ParamsHash, &e.Summary,
-		&level, &decision, &e.Rule, &outcome, &e.ApprovalID, &e.ReceiptID, &e.Detail, &e.PrevHash, &e.Hash)
+		&level, &decision, &e.Rule, &outcome, &e.ApprovalID, &e.ReceiptID, &e.Detail, &e.PrevHash, &e.Hash, &e.Score)
 	if err != nil {
 		return audit.Entry{}, err
 	}
@@ -244,16 +245,17 @@ func (p *Postgres) ListAudit(ctx context.Context, f audit.Filter) ([]audit.Entry
 // --- approvals ---
 
 const approvalColumns = `id, agent_id, owner_id, tool, params_hash, summary, arguments, level, rule,
-	status, created_at, decided_at, decided_by, valid_until, used_at, expires_at`
+	status, created_at, decided_at, decided_by, valid_until, used_at, expires_at, score, reasons`
 
 // CreateApproval implements approval.Repository.
 func (p *Postgres) CreateApproval(ctx context.Context, a approval.Approval) error {
 	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO approvals
-			(id, agent_id, owner_id, tool, params_hash, summary, arguments, level, rule, status, created_at, expires_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+			(id, agent_id, owner_id, tool, params_hash, summary, arguments, level, rule, status, created_at, expires_at,
+			 score, reasons)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 			a.ID, a.AgentID, a.OwnerID, a.Tool, a.ParamsHash, a.Summary, string(a.Arguments),
-			string(a.Level), a.Rule, string(a.Status), a.CreatedAt, nullTime(a.ExpiresAt))
+			string(a.Level), a.Rule, string(a.Status), a.CreatedAt, nullTime(a.ExpiresAt), a.Score, reasonsJSON(a.Reasons))
 		if err != nil {
 			return fmt.Errorf("postgres: create approval: %w", err)
 		}
@@ -354,8 +356,9 @@ func (p *Postgres) scanApproval(ctx context.Context, row pgx.Row) (approval.Appr
 	var a approval.Approval
 	var args, level, status string
 	var decidedAt, validUntil, usedAt, expiresAt *time.Time // pointers, because these columns can be NULL
+	var reasons []byte
 	err := row.Scan(&a.ID, &a.AgentID, &a.OwnerID, &a.Tool, &a.ParamsHash, &a.Summary, &args, &level, &a.Rule,
-		&status, &a.CreatedAt, &decidedAt, &a.DecidedBy, &validUntil, &usedAt, &expiresAt)
+		&status, &a.CreatedAt, &decidedAt, &a.DecidedBy, &validUntil, &usedAt, &expiresAt, &a.Score, &reasons)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return approval.Approval{}, approval.ErrNotFound
 	}
@@ -363,6 +366,9 @@ func (p *Postgres) scanApproval(ctx context.Context, row pgx.Row) (approval.Appr
 		return approval.Approval{}, fmt.Errorf("postgres: read approval: %w", err)
 	}
 	a.Arguments, a.Level, a.Status = []byte(args), policy.Level(level), approval.Status(status)
+	if err := json.Unmarshal(reasons, &a.Reasons); err != nil {
+		return approval.Approval{}, fmt.Errorf("postgres: read approval reasons: %w", err)
+	}
 	a.CreatedAt = a.CreatedAt.UTC()
 	a.DecidedAt, a.ValidUntil, a.UsedAt, a.ExpiresAt = utc(decidedAt), utc(validUntil), utc(usedAt), utc(expiresAt)
 
@@ -406,6 +412,15 @@ func (p *Postgres) PruneUsedReceipts(ctx context.Context, now time.Time) (int64,
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
+}
+
+// reasonsJSON stores reasons as a JSON array; none is [] rather than NULL.
+func reasonsJSON(reasons []string) string {
+	if len(reasons) == 0 {
+		return "[]"
+	}
+	b, _ := json.Marshal(reasons) // a []string always encodes
+	return string(b)
 }
 
 func nullTime(t time.Time) any {

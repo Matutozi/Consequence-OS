@@ -28,12 +28,12 @@ func (c *Conditions) UnmarshalYAML(node *yaml.Node) error {
 		*c = Conditions{cond}
 	case yaml.SequenceNode:
 		if len(node.Content) == 0 {
-			return fmt.Errorf("line %d: when list is empty; remove when to match every call", node.Line)
+			return fmt.Errorf("line %d: condition list is empty; remove it to match every call", node.Line)
 		}
 		list := make(Conditions, 0, len(node.Content))
 		for _, item := range node.Content {
 			if item.Kind != yaml.MappingNode {
-				return fmt.Errorf("line %d: each when item must be a condition like { arg: amount, op: lte, value: 50 }", item.Line)
+				return fmt.Errorf("line %d: each item must be a condition like { arg: amount, op: lte, value: 50 }", item.Line)
 			}
 			cond, err := decodeCondition(item)
 			if err != nil {
@@ -43,7 +43,7 @@ func (c *Conditions) UnmarshalYAML(node *yaml.Node) error {
 		}
 		*c = list
 	default:
-		return fmt.Errorf("line %d: when must be a condition or a list of conditions", node.Line)
+		return fmt.Errorf("line %d: conditions must be a condition or a list of conditions", node.Line)
 	}
 	return nil
 }
@@ -66,11 +66,19 @@ func decodeCondition(node *yaml.Node) (Condition, error) {
 	return cond, nil
 }
 
-func (c Conditions) validate() error {
+// validate checks each condition. field ("when" or "consequence") names
+// the list in errors.
+func (c Conditions) validate(field string) error {
+	return c.each(field, Condition.validate)
+}
+
+// each runs check on every condition, naming the failing item when there
+// is more than one.
+func (c Conditions) each(field string, check func(Condition) error) error {
 	for i, cond := range c {
-		if err := cond.validate(); err != nil {
+		if err := check(cond); err != nil {
 			if len(c) > 1 {
-				return fmt.Errorf("when item %d: %w", i+1, err)
+				return fmt.Errorf("%s item %d: %w", field, i+1, err)
 			}
 			return err
 		}

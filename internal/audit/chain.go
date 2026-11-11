@@ -41,6 +41,9 @@ type hashed struct {
 	ReceiptID  string `json:"receipt_id"`
 	Detail     string `json:"detail"`
 	PrevHash   string `json:"prev_hash"`
+	// Fields added after the chain shipped are omitempty, so an entry
+	// without them hashes exactly as it did before they existed.
+	Score int `json:"score,omitempty"`
 }
 
 // ChainHash returns the hash for e when it follows an entry whose hash is
@@ -52,7 +55,7 @@ func ChainHash(prev string, e Entry) (string, error) {
 		AgentID: e.AgentID, OwnerID: e.OwnerID, Tool: e.Tool, ParamsHash: e.ParamsHash,
 		Summary: e.Summary, Level: string(e.Level), Decision: string(e.Decision), Rule: e.Rule,
 		Outcome: string(e.Outcome), ApprovalID: e.ApprovalID, ReceiptID: e.ReceiptID,
-		Detail: e.Detail, PrevHash: prev,
+		Detail: e.Detail, PrevHash: prev, Score: e.Score,
 	})
 	if err != nil {
 		return "", err

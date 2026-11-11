@@ -84,7 +84,7 @@ func TestAudit(t *testing.T) {
 	forEachStore(t, func(t *testing.T, st Store) {
 		ctx := context.Background()
 		seed := []audit.Entry{
-			{Time: at, AgentID: "bot-a", OwnerID: "o", Tool: "payments.refund", Decision: policy.ActionAllow, Outcome: audit.OutcomeForwarded, ReceiptID: "rcpt_1"},
+			{Time: at, AgentID: "bot-a", OwnerID: "o", Tool: "payments.refund", Decision: policy.ActionAllow, Outcome: audit.OutcomeForwarded, ReceiptID: "rcpt_1", Score: 80},
 			{Time: at.Add(1 * time.Minute), AgentID: "bot-a", OwnerID: "o", Tool: "payments.refund", Decision: policy.ActionAsk, Outcome: audit.OutcomeHeld, ApprovalID: "apr_1"},
 			{Time: at.Add(2 * time.Minute), AgentID: "bot-b", OwnerID: "o", Tool: "db.delete_users", Decision: policy.ActionDeny, Outcome: audit.OutcomeBlocked},
 			{Time: at.Add(3 * time.Minute), AgentID: "bot-b", OwnerID: "o", Tool: "notes.read", Decision: policy.ActionAllow, Outcome: audit.OutcomeForwarded},
@@ -174,7 +174,8 @@ func pendingApproval(id, hash string) approval.Approval {
 	return approval.Approval{
 		ID: id, AgentID: "bot", OwnerID: "acme", Tool: "payments.refund", ParamsHash: hash,
 		Summary: "payments.refund with amount", Arguments: []byte(`{"amount":5000}`),
-		Level: policy.LevelIrreversible, Rule: "big-refunds", Status: approval.StatusPending, CreatedAt: at,
+		Level: policy.LevelIrreversible, Score: 80, Reasons: []string{"payments.refund is listed as irreversible in the tools map."},
+		Rule: "big-refunds", Status: approval.StatusPending, CreatedAt: at,
 		Tokens: []approval.ApproverToken{
 			{Approver: "ada@acme.example", Hash: sha256.Sum256([]byte("ada-secret"))},
 			{Approver: "bo@acme.example", Hash: sha256.Sum256([]byte("bo-secret"))},
@@ -237,6 +238,17 @@ func TestApprovals(t *testing.T) {
 		}
 		if string(used.Arguments) != `{"amount":5000}` || len(used.Tokens) != 2 || used.Tokens[0].Hash != sha256.Sum256([]byte("ada-secret")) {
 			t.Errorf("arguments or tokens lost: %s %+v", used.Arguments, used.Tokens)
+		}
+		if used.Score != 80 || len(used.Reasons) != 1 || !strings.Contains(used.Reasons[0], "irreversible") {
+			t.Errorf("score or reasons lost: %d %q", used.Score, used.Reasons)
+		}
+		bare := pendingApproval("apr_bare", "h9")
+		bare.Reasons = nil
+		if err := st.CreateApproval(ctx, bare); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := st.GetApproval(ctx, "apr_bare"); len(got.Reasons) != 0 {
+			t.Errorf("no reasons came back as %q", got.Reasons)
 		}
 		rejected, _ := st.GetApproval(ctx, "apr_3")
 		if rejected.Status != approval.StatusRejected || !rejected.ValidUntil.IsZero() {
@@ -538,18 +550,22 @@ func tamper(t *testing.T, st Store, how string, id string) {
 			if s.audit[i].ID != id {
 				continue
 			}
-			if how == "edit" {
+			switch how {
+			case "edit":
 				s.audit[i].Summary = "nothing to see here"
-			} else {
+			case "lower the score":
+				s.audit[i].Score = 5
+			default:
 				s.audit = append(s.audit[:i], s.audit[i+1:]...)
 			}
 			return
 		}
 	case *Postgres:
-		query := `UPDATE audit_entries SET summary = 'nothing to see here' WHERE id = $1`
-		if how == "delete" {
-			query = `DELETE FROM audit_entries WHERE id = $1`
-		}
+		query := map[string]string{
+			"edit":            `UPDATE audit_entries SET summary = 'nothing to see here' WHERE id = $1`,
+			"lower the score": `UPDATE audit_entries SET score = 5 WHERE id = $1`,
+			"delete":          `DELETE FROM audit_entries WHERE id = $1`,
+		}[how]
 		if _, err := s.pool.Exec(context.Background(), query, id); err != nil {
 			t.Fatal(err)
 		}
@@ -559,13 +575,13 @@ func tamper(t *testing.T, st Store, how string, id string) {
 }
 
 func TestTamperingIsDetected(t *testing.T) {
-	for _, how := range []string{"edit", "delete"} {
+	for _, how := range []string{"edit", "lower the score", "delete"} {
 		t.Run(how, func(t *testing.T) {
 			forEachStore(t, func(t *testing.T, st Store) {
 				ctx := context.Background()
 				var ids []string
 				for i := 0; i < 4; i++ {
-					e, err := st.AppendAudit(ctx, audit.Entry{Time: at, AgentID: "bot", OwnerID: "o", Tool: "x", Outcome: audit.OutcomeForwarded})
+					e, err := st.AppendAudit(ctx, audit.Entry{Time: at, AgentID: "bot", OwnerID: "o", Tool: "x", Outcome: audit.OutcomeForwarded, Score: 80})
 					if err != nil {
 						t.Fatal(err)
 					}

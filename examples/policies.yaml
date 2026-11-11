@@ -20,8 +20,11 @@ agents:
     owner_id: acme
     api_key_env: CONSEQUENCE_KEY_SUPPORT_BOT
 
-# How serious each tool is. Unlisted tools count as irreversible, and with
-# no matching rule, read tools are allowed and everything else asks.
+# How serious each tool is. Unlisted tools count as irreversible. Each level
+# gives a consequence score: read 0, reversible 40, irreversible 80. With no
+# matching rule, calls scoring under default_allow_below are allowed and
+# everything else asks, so reads go through and the rest ask.
+default_allow_below: 20
 tools:
   db.query: read
   db.delete_rows: irreversible
@@ -38,6 +41,17 @@ tools:
   payments.refund: irreversible
 
 rules:
+  # --- By consequence ------------------------------------------------------
+  # A rule can match what a call would do rather than which tool it is.
+  # Facts: score, reversibility, blast_radius, source, data_classes, owners
+  # and targets. Deny rules like this one go first, so nothing below can
+  # allow what they forbid.
+  - name: nothing-irreversible-at-weekends
+    tool: "*"
+    consequence: { arg: reversibility, op: eq, value: none }
+    during: { days: [sat, sun], timezone: Africa/Lagos }
+    action: deny
+
   # --- Databases ---------------------------------------------------------
   - name: never-drop-tables
     tool: db.drop_table

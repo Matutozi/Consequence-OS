@@ -476,3 +476,41 @@ func TestPageDescribesReads(t *testing.T) {
 		})
 	}
 }
+
+func TestPageShowsScoreAndReasons(t *testing.T) {
+	e := newEnv(t)
+	req := request("5000")
+	req.Score, req.Reasons = 82, []string{"payments.refund is listed as irreversible in the tools map.", "It moves <money>."}
+	id := e.check(t, req).Approval.ID
+	rec := httptest.NewRecorder()
+	newServer(e).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/approvals/"+id, nil))
+	body := rec.Body.String()
+	for _, want := range []string{"Consequence score <strong>82</strong> of 100", "<li>payments.refund is listed as irreversible in the tools map.</li>", "It moves &lt;money&gt;."} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page does not contain %q", want)
+		}
+	}
+
+	// An approval from before scores existed has no reasons, and shows no score.
+	old := request("6000")
+	id = e.check(t, old).Approval.ID
+	rec = httptest.NewRecorder()
+	newServer(e).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/approvals/"+id, nil))
+	if strings.Contains(rec.Body.String(), "Consequence score") {
+		t.Error("an approval without reasons showed a score")
+	}
+}
+
+func TestDecisionEntriesCarryTheScore(t *testing.T) {
+	e := newEnv(t)
+	req := request("5000")
+	req.Score = 82
+	id := e.check(t, req).Approval.ID
+	if _, err := e.svc.Decide(context.Background(), id, e.token(t, id), true); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := e.store.ListAudit(context.Background(), audit.Filter{Limit: 1})
+	if entries[0].Outcome != audit.OutcomeApproved || entries[0].Score != 82 {
+		t.Errorf("entry = %+v, want approved with score 82", entries[0])
+	}
+}

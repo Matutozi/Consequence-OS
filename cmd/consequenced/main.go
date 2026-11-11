@@ -3,7 +3,7 @@
 //	consequenced -config consequence.yaml            run the server
 //	             [-listen 0.0.0.0:8080]              ...on this address (or $CONSEQUENCE_LISTEN)
 //	consequenced -check                              validate config, print a summary, exit
-//	consequenced -tool payments.refund -args '{...}' show the policy decision for one call
+//	consequenced -tool payments.refund -args '{...}' show the assessment and policy decision for one call
 //	             [-at 2026-11-02T22:00:00Z]          ...as if made at that time
 //	consequenced -verify-audit                       check the stored audit log's hash chain
 //	consequenced -genkeys                            print fresh receipt signing keys
@@ -80,7 +80,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	engine, err := policy.NewEngine(cfg.Rules, cfg.Tools)
+	engine, err := cfg.NewEngine()
 	if err != nil {
 		return err
 	}
@@ -340,7 +340,12 @@ func explain(out io.Writer, engine *policy.Engine, tool, rawArgs, rawAt string) 
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "tool=%s level=%s action=%s rule=%s\n", tool, d.Level, d.Action, d.Rule)
+	a := d.Consequence
+	fmt.Fprintf(out, "tool=%s level=%s action=%s rule=%s score=%d reversibility=%s source=%s\n",
+		tool, d.Level, d.Action, d.Rule, a.Score, a.Reversibility, a.Source)
+	for _, reason := range a.Reasons {
+		fmt.Fprintf(out, "  because: %s\n", reason)
+	}
 	if len(engine.UsageScopes(tool)) > 0 {
 		fmt.Fprintln(out, "note: limit rules were checked as if this agent had made no calls yet")
 	}
@@ -393,8 +398,10 @@ func printSummary(out io.Writer, cfg *config.Config) {
 
 	fmt.Fprintf(out, "  rules (%d), first match wins:\n", len(cfg.Rules))
 	for i, r := range cfg.Rules {
-		fmt.Fprintf(out, "    %d. %s: %s -> %s%s%s\n", i+1, r.Name, r.Tool, r.Action, describeWhen(r.When), describeExtras(r))
+		fmt.Fprintf(out, "    %d. %s: %s -> %s%s%s%s\n", i+1, r.Name, r.Tool, r.Action,
+			describeConds(" when ", r.When), describeConds(" when consequence ", r.Consequence), describeExtras(r))
 	}
+	fmt.Fprintf(out, "  when no rule matches: calls scoring under %d are allowed, the rest ask\n", *cfg.DefaultAllowBelow)
 }
 
 // printWarnings lists rules that are valid but may let through more than
@@ -428,7 +435,7 @@ func describeExtras(r policy.Rule) string {
 	return ", " + strings.Join(parts, ", ")
 }
 
-func describeWhen(conds policy.Conditions) string {
+func describeConds(prefix string, conds policy.Conditions) string {
 	if len(conds) == 0 {
 		return ""
 	}
@@ -439,7 +446,7 @@ func describeWhen(conds policy.Conditions) string {
 			parts[i] += " (any case)"
 		}
 	}
-	return " when " + strings.Join(parts, " and ")
+	return prefix + strings.Join(parts, " and ")
 }
 
 // formatValue prints lists with commas; %v would print [Coleman Cables Acme Steel].

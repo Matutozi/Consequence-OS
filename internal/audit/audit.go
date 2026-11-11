@@ -31,14 +31,17 @@ const (
 // Entry is one line in the audit log. It never holds raw arguments, only
 // their hash and a short summary.
 type Entry struct {
-	ID         string        `json:"id"`
-	Time       time.Time     `json:"time"`
-	AgentID    string        `json:"agent_id"`
-	OwnerID    string        `json:"owner_id"`
-	Tool       string        `json:"tool"`
-	ParamsHash string        `json:"params_hash,omitempty"`
-	Summary    string        `json:"summary,omitempty"`
-	Level      policy.Level  `json:"level,omitempty"`
+	ID         string       `json:"id"`
+	Time       time.Time    `json:"time"`
+	AgentID    string       `json:"agent_id"`
+	OwnerID    string       `json:"owner_id"`
+	Tool       string       `json:"tool"`
+	ParamsHash string       `json:"params_hash,omitempty"`
+	Summary    string       `json:"summary,omitempty"`
+	Level      policy.Level `json:"level,omitempty"`
+	// Score is the call's consequence score, 0 to 100. It's 0 for reads,
+	// and for entries written before scores existed.
+	Score      int           `json:"score,omitempty"`
 	Decision   policy.Action `json:"decision,omitempty"`
 	Rule       string        `json:"rule,omitempty"`
 	Outcome    Outcome       `json:"outcome"`

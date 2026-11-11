@@ -158,3 +158,27 @@ func TestSavedHead(t *testing.T) {
 		})
 	}
 }
+
+// An entry written before scores existed must hash exactly as it did then.
+// The hash below was computed by the code before the score field was added.
+func TestEntriesFromBeforeScoresStillVerify(t *testing.T) {
+	e := Entry{ID: "aud_golden", Time: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC), AgentID: "support-bot", OwnerID: "acme",
+		Tool: "payments.refund", ParamsHash: "sha256:p", Summary: "payments.refund with amount", Level: "irreversible",
+		Decision: "ask", Rule: "big-refunds", Outcome: OutcomeHeld, ApprovalID: "apr_1"}
+	got, err := ChainHash("sha256:prev", e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "sha256:55e350256d81d729d570c08d4b84a601b3faf8dc0f08ef47f33db76890f76d23"; got != want {
+		t.Errorf("hash = %s, want %s", got, want)
+	}
+
+	// A score is covered by the hash, so changing it breaks the chain.
+	e.Score = 80
+	scored, _ := ChainHash("sha256:prev", e)
+	e.Score = 20
+	lowered, _ := ChainHash("sha256:prev", e)
+	if scored == got || scored == lowered {
+		t.Error("the score is not covered by the hash")
+	}
+}

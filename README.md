@@ -23,7 +23,7 @@ ConsequenceOS doesn't detect prompt injection or tell a good instruction from a 
 
 ## What it can guard
 
-Any action an agent takes through an MCP tool, and anything it reads through MCP resources or prompts. ConsequenceOS doesn't know what a tool does: rules match the tool's name (globs allowed), its arguments, how much the agent has already done, and the time.
+Any action an agent takes through an MCP tool, and anything it reads through MCP resources or prompts. ConsequenceOS doesn't know what a tool does: rules match the tool's name (globs allowed), its arguments, its consequence score, how much the agent has already done, and the time.
 
 | Kind of action | Example rule |
 |---|---|
@@ -40,6 +40,7 @@ All of these, written out, are in [examples/policies.yaml](examples/policies.yam
 
 - [Connecting an agent](docs/agents.md): point an MCP client at ConsequenceOS, and handle allowed, blocked and held calls. There's a runnable [Python agent example](examples/python-agent/agent.py).
 - [Protecting a tool server](docs/receivers.md): refuse calls without a valid receipt, in Go, Python or any language.
+- [Consequence](docs/consequence.md): the score each call gets, the facts rules can match on, and what the assessment doesn't cover yet.
 - [Policy](#policy) and [configuration](#configuration) are below.
 
 ## Install
@@ -143,6 +144,21 @@ If the audit log, the approval store or receipt signing is unavailable, the call
 
 One agent can have at most `max_pending_approvals` requests waiting (20 by default). Past that, a new ask is refused instead of held, so nobody is emailed. Without the cap, an agent could open a new approval for every slightly changed argument and wear the approvers down. The refusal is audited as `blocked` with the detail `too many pending approvals`. On a busy deployment with several servers sharing one database, a burst can overshoot the cap by a few.
 
+## Consequence
+
+Before the policy decides, each call is assessed: a score from 0 to 100, how reversible it is, and the reasons for both. Today the assessment comes from the `tools` map: read tools score 0, reversible ones 40, and irreversible or unlisted ones 80. Rules can match on it:
+
+```yaml
+- name: high-consequence-asks
+  tool: "*"
+  consequence: { arg: score, op: gte, value: 70 }
+  action: ask
+```
+
+When no rule matches, calls scoring under `default_allow_below` (20 by default) are allowed and the rest ask. The audit log records each call's score, and the approval page shows the score and its reasons. `consequenced -tool` prints both too.
+
+[Consequence](docs/consequence.md) lists every fact a rule can use, how lists match, and what the assessment doesn't cover yet.
+
 ## Policy
 
 Policy lives in `consequence.yaml`. Rules are checked top to bottom and the first match wins.
@@ -174,7 +190,7 @@ rules:
 - **Operators:** `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`.
 - **Text is matched exactly,** unless the condition says `fold: true`. Then outer spaces are ignored and letter case doesn't matter, so `"Production "` matches `production`. It works with `eq`, `ne`, `in` and `not_in`.
 - **Missing or wrong-type arguments:** if the argument is missing or the wrong type (for example the amount sent as the text `"10"`), the condition doesn't match and the next rule is checked.
-- **When nothing matches:** read tools are allowed and everything else asks.
+- **When nothing matches:** calls scoring under `default_allow_below` are allowed and everything else asks. With the default scores, read tools are allowed and everything else asks.
 - **Globs:** `*` matches any run of characters and `?` any one, including `/`. So `resource:file:///etc/*` covers everything under `/etc`, and a catch-all `*` covers reads as well as tools.
 
 **Allow what you trust, rather than deny what you fear.** A rule that matches text can be skipped by a spelling it didn't expect, and the call goes on to the next rule. For an `allow` rule that's safe: the call falls through and asks. For a `deny` or `ask` rule it isn't, especially when an allow-everything rule comes after it. Add `fold: true` to those, or list the values you allow and let everything else ask. `-check` warns about deny and ask rules that depend on exact text:
@@ -408,6 +424,7 @@ One YAML file names everything, and secrets live in environment variables that t
 | `approval_timeout` | How long a held call waits for a decision before it expires (default `1h`) |
 | `approval_validity` | How long an approval stays usable after it's granted (default `10m`) |
 | `max_pending_approvals` | How many approvals one agent may have waiting at once (default `20`). Past it, new asks are refused and nobody is emailed |
+| `default_allow_below` | The consequence score under which a call no rule matches is allowed (default `20`; `0` allows nothing by default) |
 | `admin_token_env` | Env var holding the token for `/v1/audit` |
 | `agents` | `id`, `owner_id` and `api_key_env` for each agent |
 | `receivers` | `id` and `api_key_env` for each receiver allowed to call the verify endpoint |
@@ -490,7 +507,8 @@ This is an early MVP. Built:
 - rate and spending limits, and time-window rules;
 - the FastAPI/Starlette receiver middleware;
 - a hash-chained audit log, with signed heads and a verify command;
-- policy checks on resource reads and prompts, a cap on pending approvals, and approval decisions that are always audited.
+- policy checks on resource reads and prompts, a cap on pending approvals, and approval decisions that are always audited;
+- consequence scores, with rules that match on them and the score in the audit log and on the approval page.
 
 Not yet:
 - passkey-signed approvals.

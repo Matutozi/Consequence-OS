@@ -2,7 +2,8 @@ package policy
 
 import (
 	"fmt"
-	"strings"
+
+	"github.com/matutozi/consequence-os/internal/consequence"
 )
 
 // Level says how hard a tool's effects are to undo. Levels come only from our
@@ -25,17 +26,38 @@ func (l Level) Valid() bool {
 }
 
 // Resource reads and prompt fetches go past the policy under these names:
-// "resource:" plus the URI, and "prompt:" plus the prompt's name. MCP tool
-// names can't contain ":", so they can't collide with a real tool.
+// "resource:" plus the URI, and "prompt:" plus the prompt's name. They're
+// defined in package consequence, which also treats them as reads.
 const (
-	ResourcePrefix = "resource:"
-	PromptPrefix   = "prompt:"
+	ResourcePrefix = consequence.ResourcePrefix
+	PromptPrefix   = consequence.PromptPrefix
 )
 
 // IsRead reports whether name is a resource read or a prompt fetch rather
 // than a tool call.
-func IsRead(name string) bool {
-	return strings.HasPrefix(name, ResourcePrefix) || strings.HasPrefix(name, PromptPrefix)
+func IsRead(name string) bool { return consequence.IsRead(name) }
+
+// Reversibility says how the consequence package names a level.
+func (l Level) Reversibility() consequence.Reversibility {
+	switch l {
+	case LevelRead:
+		return consequence.Read
+	case LevelReversible:
+		return consequence.Reversible
+	}
+	return consequence.None
+}
+
+// LevelOf is the level for a reversibility. Compensable counts as
+// irreversible: the effect itself can't be undone.
+func LevelOf(r consequence.Reversibility) Level {
+	switch r {
+	case consequence.Read:
+		return LevelRead
+	case consequence.Reversible:
+		return LevelReversible
+	}
+	return LevelIrreversible
 }
 
 // Levels maps exact tool names to their consequence level.

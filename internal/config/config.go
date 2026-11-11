@@ -45,6 +45,10 @@ type Config struct {
 	Receivers []Receiver    `yaml:"receivers"`
 	Tools     policy.Levels `yaml:"tools"`
 	Rules     []policy.Rule `yaml:"rules"`
+	// DefaultAllowBelow is the consequence score under which a call no rule
+	// matches is allowed. A pointer, so an explicit 0 (allow nothing by
+	// default) differs from leaving it out (policy.DefaultAllowBelow).
+	DefaultAllowBelow *int `yaml:"default_allow_below"`
 
 	// AdminTokenEnv names the env var holding the token for owner endpoints
 	// such as GET /v1/audit.
@@ -177,6 +181,10 @@ func (c *Config) applyDefaults() {
 	if c.MaxPendingApprovals == 0 {
 		c.MaxPendingApprovals = DefaultMaxPending
 	}
+	if c.DefaultAllowBelow == nil {
+		n := policy.DefaultAllowBelow
+		c.DefaultAllowBelow = &n
+	}
 	if c.Receipts.TTL == 0 {
 		c.Receipts.TTL = DefaultReceiptTTL
 	}
@@ -305,10 +313,19 @@ func (c *Config) validate() error {
 		return fmt.Errorf("public_url %q must be an http(s) URL", c.PublicURL)
 	}
 	// Building the engine is the single source of truth for rule validation.
-	if _, err := policy.NewEngine(c.Rules, c.Tools); err != nil {
+	if _, err := c.NewEngine(); err != nil {
 		return fmt.Errorf("policy: %w", err)
 	}
 	return nil
+}
+
+// NewEngine builds the policy engine this config describes.
+func (c *Config) NewEngine() (*policy.Engine, error) {
+	var opts []policy.Option
+	if c.DefaultAllowBelow != nil {
+		opts = append(opts, policy.AllowBelow(*c.DefaultAllowBelow))
+	}
+	return policy.NewEngine(c.Rules, c.Tools, opts...)
 }
 
 func validateUpstream(raw string) error {
