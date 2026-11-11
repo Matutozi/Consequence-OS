@@ -149,12 +149,10 @@ func (p *Proxy) handleToolCall(w http.ResponseWriter, r *http.Request, agent con
 		writeJSON(w, http.StatusBadRequest, errorResponse(msg.id, codeInvalidParams, "arguments could not be hashed"))
 		return
 	}
-	// With limit rules, this agent's calls to this tool go one at a time
-	// until the call is recorded, so parallel calls can't all fit under a limit.
-	release := func() {}
-	if p.engine.TracksUsage(call.name) {
-		release = p.limits.lock(agent.ID + "\x00" + call.name)
-	}
+	// With limit rules, this agent's calls in each limit scope that covers
+	// this tool go one at a time until the call is recorded, so parallel
+	// calls can't all fit under a limit. No scopes means no locks.
+	release := p.limits.lockAll(agent.ID+"\x00", p.engine.UsageScopes(call.name))
 	defer release()
 
 	pc := policy.Call{AgentID: agent.ID, Tool: call.name, Args: call.args, At: entry.Time}
@@ -260,10 +258,11 @@ func (p *Proxy) forwardWithReceipt(w http.ResponseWriter, r *http.Request, msg m
 		return
 	}
 	// Usage first: if the audit write then fails, a call is over-counted
-	// (the safe way round) rather than forwarded uncounted.
-	if p.engine.TracksUsage(entry.Tool) {
-		if err := p.store.RecordUsage(r.Context(), p.engine.UsageRecord(pc)); err != nil {
-			p.log.Error("usage write failed", "tool", entry.Tool, "err", err)
+	// (the safe way round) rather than forwarded uncounted. Likewise if one
+	// scope's record fails after another's was saved.
+	for _, u := range p.engine.UsageRecords(pc) {
+		if err := p.store.RecordUsage(r.Context(), u); err != nil {
+			p.log.Error("usage write failed", "tool", entry.Tool, "scope", u.Tool, "err", err)
 			fail("usage log unavailable")
 			return
 		}

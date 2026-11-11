@@ -42,9 +42,11 @@ rules:
   - name: never-drop-tables
     tool: db.drop_table
     action: deny
+  # fold: true matches "Production" and " production" too. A deny that
+  # needs an exact spelling is skipped by any other one.
   - name: no-deletes-in-production
     tool: db.delete_rows
-    when: { arg: environment, op: eq, value: production }
+    when: { arg: environment, op: eq, value: production, fold: true }
     action: deny
   - name: small-deletes-in-staging
     tool: db.delete_rows
@@ -56,10 +58,14 @@ rules:
   # --- Code and repositories ---------------------------------------------
   - name: merges-to-critical-repos-need-review
     tool: github.merge_pull_request
-    when: { arg: repo, op: in, value: [acme/api, acme/billing] }
+    when: { arg: repo, op: in, value: [acme/api, acme/billing], fold: true }
     action: ask
-  - name: other-merges
+  # Allow merges only into repos you name, rather than allowing all the
+  # rest: a repo nobody listed, or one written in an unexpected way, then
+  # falls through to the default and asks, because merging is irreversible.
+  - name: merges-to-everyday-repos
     tool: github.merge_pull_request
+    when: { arg: repo, op: in, value: [acme/docs, acme/website] }
     action: allow
   - name: issue-spam-guard
     tool: github.create_issue

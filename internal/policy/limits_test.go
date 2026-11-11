@@ -3,6 +3,8 @@ package policy
 import (
 	"context"
 	"errors"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +90,9 @@ func TestLimits(t *testing.T) {
 		{"sum stays under", Limit{Sum: "amount", Max: 2000, Per: 24 * time.Hour}, map[string]any{"amount": 500.0}, fakeUsage{sum: 1500}, false},
 		{"sum would pass the limit", Limit{Sum: "amount", Max: 2000, Per: 24 * time.Hour}, map[string]any{"amount": 500.01}, fakeUsage{sum: 1500}, true},
 		{"sum with the amount as text doesn't match", Limit{Sum: "amount", Max: 2000, Per: 24 * time.Hour}, map[string]any{"amount": "9999"}, fakeUsage{sum: 1500}, false},
+		{"a negative amount always matches", Limit{Sum: "amount", Max: 2000, Per: 24 * time.Hour}, map[string]any{"amount": -100000.0}, fakeUsage{}, true},
+		{"so does a tiny negative one", Limit{Sum: "amount", Max: 2000, Per: 24 * time.Hour}, map[string]any{"amount": -0.01}, fakeUsage{}, true},
+		{"zero is fine", Limit{Sum: "amount", Max: 2000, Per: 24 * time.Hour}, map[string]any{"amount": 0.0}, fakeUsage{}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -134,21 +139,44 @@ func TestLimitAsksAboutTheRightWindow(t *testing.T) {
 
 func TestUsageHelpers(t *testing.T) {
 	e, _ := NewEngine([]Rule{
-		{Name: "count", Tool: "payments.*", Limit: &Limit{Max: 10, Per: time.Hour}, Action: ActionAsk},
-		{Name: "total", Tool: "payments.refund", Limit: &Limit{Sum: "amount", Max: 100, Per: 48 * time.Hour}, Action: ActionAsk},
+		{Name: "family-total", Tool: "payments.*", Limit: &Limit{Sum: "amount", Max: 500, Per: time.Hour}, Action: ActionAsk},
+		{Name: "family-count", Tool: "payments.*", Limit: &Limit{Max: 10, Per: time.Hour}, Action: ActionAsk},
+		{Name: "refund-total", Tool: "payments.refund", Limit: &Limit{Sum: "fee", Max: 100, Per: 48 * time.Hour}, Action: ActionAsk},
 		{Name: "plain", Tool: "notes.read", Action: ActionAllow},
 	}, nil)
-	if !e.TracksUsage("payments.charge") || e.TracksUsage("notes.read") {
-		t.Error("TracksUsage is wrong")
+	scopes := map[string][]string{
+		"payments.refund": {"payments.*", "payments.refund"}, // sorted, each pattern once
+		"payments.charge": {"payments.*"},
+		"notes.read":      nil,
 	}
-	if got := e.SummedArgs("payments.refund"); len(got) != 1 || got[0] != "amount" {
-		t.Errorf("SummedArgs = %v", got)
+	for tool, want := range scopes {
+		if got := e.UsageScopes(tool); !slices.Equal(got, want) {
+			t.Errorf("UsageScopes(%s) = %v, want %v", tool, got, want)
+		}
 	}
-	if got := e.SummedArgs("payments.charge"); len(got) != 0 {
-		t.Errorf("SummedArgs(charge) = %v", got)
+
+	got := e.UsageRecords(Call{AgentID: "bot", Tool: "payments.refund", Args: map[string]any{"amount": 20.0, "fee": -3.0, "note": "x"}, At: monday10am})
+	want := []UsageRecord{
+		{AgentID: "bot", Tool: "payments.*", At: monday10am, Values: map[string]float64{"amount": 20}},
+		{AgentID: "bot", Tool: "payments.refund", At: monday10am, Values: map[string]float64{"fee": 0}}, // never negative
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("UsageRecords =\n  %+v\nwant\n  %+v", got, want)
+	}
+	if got := e.UsageRecords(Call{Tool: "notes.read"}); len(got) != 0 {
+		t.Errorf("UsageRecords(notes.read) = %v, want none", got)
 	}
 	if e.LongestWindow() != 48*time.Hour {
 		t.Errorf("LongestWindow = %v", e.LongestWindow())
+	}
+}
+
+func TestGlobLimitCountsItsPattern(t *testing.T) {
+	e, _ := NewEngine([]Rule{{Name: "family", Tool: "payments.*", Limit: &Limit{Max: 10, Per: time.Hour}, Action: ActionAsk}}, nil)
+	u := &fakeUsage{}
+	_, _ = e.Decide(context.Background(), Call{AgentID: "bot", Tool: "payments.refund", At: monday10am}, u)
+	if want := "bot payments.* 2026-11-02T08:00:00Z "; len(u.asked) != 1 || u.asked[0] != want {
+		t.Errorf("asked %q, want [%q]", u.asked, want)
 	}
 }
 

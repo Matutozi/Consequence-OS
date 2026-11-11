@@ -18,13 +18,13 @@ func (m *Memory) RecordUsage(_ context.Context, u policy.UsageRecord) error {
 	return nil
 }
 
-// CountUsage implements policy.UsageCounter.
-func (m *Memory) CountUsage(_ context.Context, agentID, tool string, since time.Time, sumArg string) (int, float64, error) {
+// CountUsage implements policy.UsageCounter. Records keep their scope in Tool.
+func (m *Memory) CountUsage(_ context.Context, agentID, scope string, since time.Time, sumArg string) (int, float64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	count, sum := 0, 0.0
 	for _, u := range m.usage {
-		if u.AgentID == agentID && u.Tool == tool && u.At.After(since) {
+		if u.AgentID == agentID && u.Tool == scope && u.At.After(since) {
 			count++
 			sum += u.Values[sumArg] // a missing key reads as 0
 		}
@@ -63,8 +63,10 @@ func (p *Postgres) RecordUsage(ctx context.Context, u policy.UsageRecord) error 
 	})
 }
 
-// CountUsage implements policy.UsageCounter.
-func (p *Postgres) CountUsage(ctx context.Context, agentID, tool string, since time.Time, sumArg string) (int, float64, error) {
+// CountUsage implements policy.UsageCounter. The tool column holds the
+// scope: a limit rule's tool pattern, which for a rule without a glob is
+// just the tool's name, as it was before scopes existed.
+func (p *Postgres) CountUsage(ctx context.Context, agentID, scope string, since time.Time, sumArg string) (int, float64, error) {
 	var count int
 	var sum float64
 	err := p.pool.QueryRow(ctx, `SELECT
@@ -72,7 +74,7 @@ func (p *Postgres) CountUsage(ctx context.Context, agentID, tool string, since t
 			coalesce(sum(value) FILTER (WHERE arg = $4 AND $4 <> ''), 0)
 		FROM usage_records
 		WHERE agent_id = $1 AND tool = $2 AND at > $3 AND (arg = '' OR arg = $4)`,
-		agentID, tool, since, sumArg).Scan(&count, &sum)
+		agentID, scope, since, sumArg).Scan(&count, &sum)
 	if err != nil {
 		return 0, 0, fmt.Errorf("postgres: count usage: %w", err)
 	}

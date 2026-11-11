@@ -13,7 +13,7 @@ import (
 //
 //	when:
 //	  - { arg: amount, op: lte, value: 50 }
-//	  - { arg: currency, op: in, value: [USD, EUR] }
+//	  - { arg: currency, op: in, value: [USD, EUR], fold: true }
 type Conditions []Condition
 
 // UnmarshalYAML lets yaml.v3 decode either form. Defining this method is
@@ -54,9 +54,9 @@ func decodeCondition(node *yaml.Node) (Condition, error) {
 	// A mapping node's Content alternates key, value, key, value.
 	for i := 0; i < len(node.Content); i += 2 {
 		switch key := node.Content[i]; key.Value {
-		case "arg", "op", "value":
+		case "arg", "op", "value", "fold":
 		default:
-			return Condition{}, fmt.Errorf("line %d: unknown condition field %q (want arg, op, value)", key.Line, key.Value)
+			return Condition{}, fmt.Errorf("line %d: unknown condition field %q (want arg, op, value, fold)", key.Line, key.Value)
 		}
 	}
 	var cond Condition

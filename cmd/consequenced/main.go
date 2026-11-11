@@ -92,6 +92,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return explain(out, engine, *tool, *toolArgs, *at)
 	case *check:
 		printSummary(out, cfg)
+		printWarnings(out, engine)
 		return nil
 	}
 	return serve(ctx, cfg, engine)
@@ -114,6 +115,9 @@ func withListen(listen string) config.LookupEnv {
 // serve runs the HTTP server until ctx is cancelled.
 func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	for _, w := range engine.Warnings() {
+		log.Warn("policy: " + w) // the same warnings -check prints
+	}
 	st, err := openStore(ctx, cfg, log)
 	if err != nil {
 		return err
@@ -335,7 +339,7 @@ func explain(out io.Writer, engine *policy.Engine, tool, rawArgs, rawAt string) 
 		return err
 	}
 	fmt.Fprintf(out, "tool=%s level=%s action=%s rule=%s\n", tool, d.Level, d.Action, d.Rule)
-	if engine.TracksUsage(tool) {
+	if len(engine.UsageScopes(tool)) > 0 {
 		fmt.Fprintln(out, "note: limit rules were checked as if this agent had made no calls yet")
 	}
 	return nil
@@ -391,6 +395,19 @@ func printSummary(out io.Writer, cfg *config.Config) {
 	}
 }
 
+// printWarnings lists rules that are valid but may let through more than
+// intended. They don't make -check fail: the config is still usable.
+func printWarnings(out io.Writer, engine *policy.Engine) {
+	warnings := engine.Warnings()
+	if len(warnings) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "warnings (%d):\n", len(warnings))
+	for _, w := range warnings {
+		fmt.Fprintf(out, "  - %s\n", w)
+	}
+}
+
 // describeExtras prints a rule's schedule and limit, if any.
 func describeExtras(r policy.Rule) string {
 	var parts []string
@@ -416,6 +433,9 @@ func describeWhen(conds policy.Conditions) string {
 	parts := make([]string, len(conds))
 	for i, c := range conds {
 		parts[i] = fmt.Sprintf("%s %s %s", c.Arg, c.Op, formatValue(c.Value))
+		if c.Fold {
+			parts[i] += " (any case)"
+		}
 	}
 	return " when " + strings.Join(parts, " and ")
 }

@@ -54,15 +54,15 @@ func TestListConditions(t *testing.T) {
 		args map[string]any
 		want bool
 	}{
-		{"in string", Condition{"currency", OpIn, currencies}, map[string]any{"currency": "EUR"}, true},
-		{"in string miss", Condition{"currency", OpIn, currencies}, map[string]any{"currency": "GBP"}, false},
-		{"in number from JSON", Condition{"code", OpIn, codes}, map[string]any{"code": 2.0}, true},
-		{"in wrong kind", Condition{"code", OpIn, codes}, map[string]any{"code": "2"}, false},
-		{"in missing arg", Condition{"currency", OpIn, currencies}, map[string]any{}, false},
-		{"not_in string", Condition{"currency", OpNotIn, currencies}, map[string]any{"currency": "GBP"}, true},
-		{"not_in string hit", Condition{"currency", OpNotIn, currencies}, map[string]any{"currency": "USD"}, false},
-		{"not_in wrong kind never matches", Condition{"currency", OpNotIn, currencies}, map[string]any{"currency": 5.0}, false},
-		{"not_in missing arg never matches", Condition{"currency", OpNotIn, currencies}, map[string]any{}, false},
+		{"in string", Condition{Arg: "currency", Op: OpIn, Value: currencies}, map[string]any{"currency": "EUR"}, true},
+		{"in string miss", Condition{Arg: "currency", Op: OpIn, Value: currencies}, map[string]any{"currency": "GBP"}, false},
+		{"in number from JSON", Condition{Arg: "code", Op: OpIn, Value: codes}, map[string]any{"code": 2.0}, true},
+		{"in wrong kind", Condition{Arg: "code", Op: OpIn, Value: codes}, map[string]any{"code": "2"}, false},
+		{"in missing arg", Condition{Arg: "currency", Op: OpIn, Value: currencies}, map[string]any{}, false},
+		{"not_in string", Condition{Arg: "currency", Op: OpNotIn, Value: currencies}, map[string]any{"currency": "GBP"}, true},
+		{"not_in string hit", Condition{Arg: "currency", Op: OpNotIn, Value: currencies}, map[string]any{"currency": "USD"}, false},
+		{"not_in wrong kind never matches", Condition{Arg: "currency", Op: OpNotIn, Value: currencies}, map[string]any{"currency": 5.0}, false},
+		{"not_in missing arg never matches", Condition{Arg: "currency", Op: OpNotIn, Value: currencies}, map[string]any{}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -139,7 +139,7 @@ func TestConditionsYAML(t *testing.T) {
 func TestValidationNamesTheFailingItem(t *testing.T) {
 	rules := []Rule{{
 		Name: "r", Tool: "x", Action: ActionAllow,
-		When: Conditions{{"amount", OpLte, 50}, {"currency", OpIn, "USD"}},
+		When: Conditions{{Arg: "amount", Op: OpLte, Value: 50}, {Arg: "currency", Op: OpIn, Value: "USD"}},
 	}}
 	_, err := NewEngine(rules, nil)
 	if err == nil || !strings.Contains(err.Error(), "when item 2") {
@@ -148,7 +148,7 @@ func TestValidationNamesTheFailingItem(t *testing.T) {
 }
 
 func TestEngineCopiesRules(t *testing.T) {
-	rules := []Rule{{Name: "r", Tool: "x", When: Conditions{{"amount", OpLte, 50}}, Action: ActionAllow}}
+	rules := []Rule{{Name: "r", Tool: "x", When: Conditions{{Arg: "amount", Op: OpLte, Value: 50}}, Action: ActionAllow}}
 	engine, err := NewEngine(rules, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -156,5 +156,62 @@ func TestEngineCopiesRules(t *testing.T) {
 	rules[0].When[0].Value = 1_000_000 // the caller changes its own copy afterwards
 	if got := evaluate(t, engine, "x", map[string]any{"amount": 500.0}); got.Action == ActionAllow {
 		t.Error("engine was affected by a later change to the caller's rules")
+	}
+}
+
+func TestFoldConditions(t *testing.T) {
+	tests := []struct {
+		name  string
+		cond  Condition
+		got   any
+		match bool
+	}{
+		{"exact by default", Condition{Arg: "env", Op: OpEq, Value: "production"}, "Production", false},
+		{"fold ignores case", Condition{Arg: "env", Op: OpEq, Value: "production", Fold: true}, "PRODUCTION", true},
+		{"fold ignores outer spaces", Condition{Arg: "env", Op: OpEq, Value: "production", Fold: true}, " production\t", true},
+		{"fold keeps inner differences", Condition{Arg: "env", Op: OpEq, Value: "production", Fold: true}, "prod", false},
+		{"fold with ne", Condition{Arg: "env", Op: OpNe, Value: "staging", Fold: true}, "Staging", false},
+		{"fold with in", Condition{Arg: "repo", Op: OpIn, Value: []any{"acme/api", "acme/billing"}, Fold: true}, "Acme/API", true},
+		{"fold with not_in", Condition{Arg: "repo", Op: OpNotIn, Value: []any{"acme/api"}, Fold: true}, "ACME/api ", false},
+		{"fold never makes a number match text", Condition{Arg: "env", Op: OpEq, Value: "1", Fold: true}, 1.0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.cond.validate(); err != nil {
+				t.Fatal(err)
+			}
+			if got := tt.cond.matches(map[string]any{tt.cond.Arg: tt.got}); got != tt.match {
+				t.Errorf("matches(%q) = %v, want %v", tt.got, got, tt.match)
+			}
+		})
+	}
+}
+
+func TestFoldValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		cond Condition
+	}{
+		{"on a number", Condition{Arg: "amount", Op: OpEq, Value: 50, Fold: true}},
+		{"with a comparison", Condition{Arg: "env", Op: OpGt, Value: 5, Fold: true}},
+		{"on a list of numbers", Condition{Arg: "n", Op: OpIn, Value: []any{1, 2}, Fold: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.cond.validate(); err == nil || !strings.Contains(err.Error(), "fold") {
+				t.Errorf("err = %v, want one about fold", err)
+			}
+		})
+	}
+}
+
+func TestFoldInYAML(t *testing.T) {
+	var r Rule
+	src := "name: r\ntool: x\nwhen: { arg: env, op: eq, value: production, fold: true }\naction: deny\n"
+	if err := yaml.Unmarshal([]byte(src), &r); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.When) != 1 || !r.When[0].Fold {
+		t.Errorf("fold not decoded: %+v", r.When)
 	}
 }

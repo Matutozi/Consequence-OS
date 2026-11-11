@@ -4,6 +4,7 @@ package policy
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -168,47 +169,46 @@ func (r *Rule) matches(ctx context.Context, c Call, usage UsageCounter) (bool, e
 	case r.Limit == nil:
 		return true, nil
 	}
-	return r.Limit.exceeded(ctx, c, usage)
+	return r.Limit.exceeded(ctx, r.Tool, c, usage)
 }
 
-// TracksUsage reports whether any limit rule covers tool, so its forwarded
-// calls need recording.
-func (e *Engine) TracksUsage(tool string) bool {
+// UsageScopes lists the scopes whose limits cover tool: the tool patterns of
+// its limit rules, sorted and without repeats. A forwarded call counts in
+// every one, so a call to payments.refund counts towards limits on both
+// payments.refund and payments.*. Empty when no limit covers tool.
+func (e *Engine) UsageScopes(tool string) []string {
+	var scopes []string
 	for _, r := range e.rules {
-		if r.Limit != nil && matchTool(r.Tool, tool) {
-			return true
+		if r.Limit != nil && matchTool(r.Tool, tool) && !slices.Contains(scopes, r.Tool) {
+			scopes = append(scopes, r.Tool)
 		}
 	}
-	return false
+	slices.Sort(scopes)
+	return scopes
 }
 
-// SummedArgs lists the arguments that limit rules for tool add up, so
-// their values can be recorded with each forwarded call.
-func (e *Engine) SummedArgs(tool string) []string {
-	var args []string
-	seen := map[string]bool{}
-	for _, r := range e.rules {
-		if r.Limit != nil && r.Limit.Sum != "" && !seen[r.Limit.Sum] && matchTool(r.Tool, tool) {
-			seen[r.Limit.Sum] = true
-			args = append(args, r.Limit.Sum)
-		}
-	}
-	return args
-}
-
-// UsageRecord describes a forwarded call for the usage log, keeping only
-// the numeric arguments that limit rules add up.
-func (e *Engine) UsageRecord(c Call) UsageRecord {
-	u := UsageRecord{AgentID: c.AgentID, Tool: c.Tool, At: c.At}
-	for _, arg := range e.SummedArgs(c.Tool) {
-		if v, ok := toNumber(c.Args[arg]); ok {
-			if u.Values == nil {
-				u.Values = map[string]float64{}
+// UsageRecords describes a forwarded call for the usage log: one record per
+// scope, keeping only the numeric arguments that scope's limits add up.
+// Negative values are kept as 0, so no call can lower a total.
+func (e *Engine) UsageRecords(c Call) []UsageRecord {
+	scopes := e.UsageScopes(c.Tool)
+	records := make([]UsageRecord, 0, len(scopes))
+	for _, scope := range scopes {
+		u := UsageRecord{AgentID: c.AgentID, Tool: scope, At: c.At}
+		for _, r := range e.rules {
+			if r.Limit == nil || r.Limit.Sum == "" || r.Tool != scope {
+				continue
 			}
-			u.Values[arg] = v
+			if v, ok := toNumber(c.Args[r.Limit.Sum]); ok {
+				if u.Values == nil {
+					u.Values = map[string]float64{}
+				}
+				u.Values[r.Limit.Sum] = max(v, 0)
+			}
 		}
+		records = append(records, u)
 	}
-	return u
+	return records
 }
 
 // LongestWindow is the longest limit window, i.e. how long usage records
