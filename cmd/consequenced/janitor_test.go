@@ -21,7 +21,7 @@ func TestJanitorSweep(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	st := store.NewMemory()
 	svc := approval.NewService(approval.Options{
-		Repo: st, Validity: 10 * time.Minute, Timeout: time.Hour, PublicURL: "http://cos.test",
+		Repo: st, Audit: st, Validity: 10 * time.Minute, Timeout: time.Hour, PublicURL: "http://cos.test",
 		Approvers: map[string][]string{"acme": {"ada@acme.example"}}, Log: log, Now: now,
 	})
 	j := &janitor{approvals: svc, store: st, keepUsage: 30 * time.Minute, log: log, now: now}

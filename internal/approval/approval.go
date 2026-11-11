@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matutozi/consequence-os/internal/audit"
@@ -41,7 +42,18 @@ var (
 	ErrNotUsable  = errors.New("approval is not approved, has expired, or was already used")
 	ErrBadToken   = errors.New("approver token is missing or wrong")
 	ErrNoApprover = errors.New("no approvers are configured for this owner")
+	// ErrTooManyPending means the agent already has as many approvals
+	// waiting as it may, so no new one was opened and nobody was notified.
+	ErrTooManyPending = errors.New("too many pending approvals")
+	// ErrNotRecorded means the audit log couldn't take the decision, so it
+	// wasn't made. The approval is still pending and the approver can retry.
+	ErrNotRecorded = errors.New("the decision could not be recorded in the audit log, so it was not made")
 )
+
+// Auditor is the part of the store the service needs to record decisions.
+type Auditor interface {
+	AppendAudit(ctx context.Context, e audit.Entry) (audit.Entry, error)
+}
 
 // ApproverToken lets one named approver decide. Only a hash of the secret is kept.
 type ApproverToken struct {
@@ -103,6 +115,9 @@ type Repository interface {
 	DecideApproval(ctx context.Context, id string, status Status, by string, at, validUntil time.Time) (Approval, error)
 	// UseApproval marks an approved, unexpired approval as used, or returns ErrNotUsable.
 	UseApproval(ctx context.Context, id string, at time.Time) (Approval, error)
+	// CountPendingApprovals counts this agent's approvals that are pending
+	// and not yet overdue at now.
+	CountPendingApprovals(ctx context.Context, agentID string, now time.Time) (int, error)
 	// ExpireApprovals marks every approval overdue at now as expired and
 	// returns them. Each approval is returned by exactly one call, even with
 	// several servers sharing the store.
@@ -139,21 +154,29 @@ type Result struct {
 // Options configures a Service.
 type Options struct {
 	Repo      Repository
+	Audit     Auditor             // records every decision; Decide refuses to work without it
 	Approvers map[string][]string // owner ID -> approver emails
 	Validity  time.Duration       // how long an approval stays usable after it's granted
 	Timeout   time.Duration       // how long a held call waits for a decision; 0 means forever
-	PublicURL string              // base URL for links, e.g. http://localhost:8080
-	Notifier  Notifier            // delivers approver links; nil means LogNotifier
-	Log       *slog.Logger
-	Now       func() time.Time
+	// MaxPending caps how many approvals one agent may have waiting at once;
+	// 0 means no cap. Without it, changing an argument slightly each time
+	// opens a new approval and emails every approver: approval fatigue.
+	MaxPending int
+	PublicURL  string   // base URL for links, e.g. http://localhost:8080
+	Notifier   Notifier // delivers approver links; nil means LogNotifier
+	Log        *slog.Logger
+	Now        func() time.Time
 }
 
 // Service implements the approval rules on top of a Repository.
 type Service struct {
 	repo      Repository
+	audit     Auditor
 	approvers map[string][]string
 	validity  time.Duration
 	timeout   time.Duration
+	maxPend   int
+	openMu    sync.Mutex // makes counting and opening one step within this process
 	publicURL string
 	notifier  Notifier
 	log       *slog.Logger
@@ -163,9 +186,11 @@ type Service struct {
 func NewService(opts Options) *Service {
 	s := &Service{
 		repo:      opts.Repo,
+		audit:     opts.Audit,
 		approvers: opts.Approvers,
 		validity:  opts.Validity,
 		timeout:   opts.Timeout,
+		maxPend:   opts.MaxPending,
 		publicURL: strings.TrimSuffix(opts.PublicURL, "/"),
 		notifier:  opts.Notifier,
 		log:       opts.Log,
@@ -185,6 +210,9 @@ func (s *Service) Validity() time.Duration { return s.validity }
 
 // Timeout returns how long a held call waits for a decision.
 func (s *Service) Timeout() time.Duration { return s.timeout }
+
+// MaxPending returns how many approvals one agent may have waiting; 0 means no cap.
+func (s *Service) MaxPending() int { return s.maxPend }
 
 // Check decides whether a held call may go through. It reuses a pending
 // approval for the same call, lets one retry through after approval, and
@@ -258,7 +286,7 @@ func (s *Service) open(ctx context.Context, req Request, now time.Time) (Approva
 	if s.timeout > 0 {
 		a.ExpiresAt = now.Add(s.timeout)
 	}
-	if err := s.repo.CreateApproval(ctx, a); err != nil {
+	if err := s.create(ctx, a, now); err != nil {
 		return Approval{}, err
 	}
 	// Each link carries a secret: whoever has it can decide as that approver.
@@ -268,6 +296,25 @@ func (s *Service) open(ctx context.Context, req Request, now time.Time) (Approva
 	s.log.Info("approval requested", "approval_id", a.ID, "agent", a.AgentID, "tool", a.Tool,
 		"rule", a.Rule, "approvers", len(approvers))
 	return a, nil
+}
+
+// create saves a new approval unless the agent is at its cap. The lock stops
+// parallel calls from one process all passing the count together. Several
+// servers sharing one database can still overshoot by a few in a burst.
+func (s *Service) create(ctx context.Context, a Approval, now time.Time) error {
+	if s.maxPend <= 0 {
+		return s.repo.CreateApproval(ctx, a)
+	}
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	n, err := s.repo.CountPendingApprovals(ctx, a.AgentID, now)
+	if err != nil {
+		return err
+	}
+	if n >= s.maxPend {
+		return fmt.Errorf("%w: %s has %d waiting", ErrTooManyPending, a.AgentID, n)
+	}
+	return s.repo.CreateApproval(ctx, a)
 }
 
 // View returns an approval and, if token belongs to one of its approvers,
@@ -281,6 +328,12 @@ func (s *Service) View(ctx context.Context, id, token string) (Approval, string,
 }
 
 // Decide records the decision of the approver whose token this is.
+//
+// The audit entry is written first and the decision saved second, so the log
+// never misses a decision: if the entry can't be written, nothing is decided
+// (ErrNotRecorded). If saving then fails, usually because another approver
+// decided a moment earlier, a second entry says the first didn't take effect.
+// The log is append-only, so it corrects itself rather than being edited.
 func (s *Service) Decide(ctx context.Context, id, token string, approve bool) (Approval, error) {
 	a, err := s.repo.GetApproval(ctx, id)
 	if err != nil {
@@ -294,11 +347,43 @@ func (s *Service) Decide(ctx context.Context, id, token string, approve bool) (A
 	if a.Overdue(now) || a.Status == StatusExpired {
 		return Approval{}, ErrExpired
 	}
-	status, validUntil := StatusRejected, time.Time{}
-	if approve {
-		status, validUntil = StatusApproved, now.Add(s.validity)
+	if a.Status != StatusPending {
+		// Already decided: refuse before writing anything, so a double
+		// click doesn't add entries. A true race is handled below.
+		return Approval{}, ErrNotPending
 	}
-	return s.repo.DecideApproval(ctx, id, status, by, now, validUntil)
+	status, validUntil, outcome := StatusRejected, time.Time{}, audit.OutcomeDeclined
+	if approve {
+		status, validUntil, outcome = StatusApproved, now.Add(s.validity), audit.OutcomeApproved
+	}
+	if err := s.record(ctx, a.AuditEntry(now, outcome, "decided by "+by)); err != nil {
+		s.log.Error("audit write failed, so the decision was not made", "approval_id", id, "by", by, "err", err)
+		return Approval{}, ErrNotRecorded
+	}
+	decided, err := s.repo.DecideApproval(ctx, id, status, by, now, validUntil)
+	if err != nil {
+		why := "saving it failed"
+		if errors.Is(err, ErrNotPending) {
+			why = "another decision came first"
+		}
+		detail := fmt.Sprintf("%s by %s was not applied: %s", status, by, why)
+		if aerr := s.record(ctx, a.AuditEntry(now, audit.OutcomeNotApplied, detail)); aerr != nil {
+			s.log.Error("audit write failed for a decision that was not applied", "approval_id", id, "err", aerr)
+		}
+		return Approval{}, err
+	}
+	s.log.Info("approval decided", "approval_id", id, "status", status, "by", by, "tool", a.Tool, "agent", a.AgentID)
+	return decided, nil
+}
+
+// record appends an audit entry. Without an auditor nothing can be
+// recorded, which counts as a failure: decisions must not go unaudited.
+func (s *Service) record(ctx context.Context, e audit.Entry) error {
+	if s.audit == nil {
+		return errors.New("approval: no audit log configured")
+	}
+	_, err := s.audit.AppendAudit(ctx, e)
+	return err
 }
 
 // ExpireOverdue marks every approval that's past its deadline as expired

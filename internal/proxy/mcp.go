@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/matutozi/consequence-os/internal/policy"
 	"github.com/matutozi/consequence-os/pkg/verify"
 )
 
@@ -21,13 +22,18 @@ const (
 
 	metaProtocolVersion = "io.modelcontextprotocol/protocolVersion"
 
-	methodToolsCall = "tools/call"
+	methodToolsCall     = "tools/call"
+	methodResourcesRead = "resources/read"
+	methodPromptsGet    = "prompts/get"
 
 	codeParseError     = -32700
 	codeInvalidRequest = -32600
 	codeInvalidParams  = -32602
 	codeInternalError  = -32603
 	codeHeaderMismatch = -32020
+	// codeRefused is ours, for a read the policy blocked or is holding.
+	// Tool calls are refused with a tool result instead; see refuse.
+	codeRefused = -32030
 )
 
 // rpcError is a JSON-RPC error plus the HTTP status to send it with.
@@ -79,31 +85,36 @@ func parseMessage(body []byte) (message, *rpcError) {
 		}
 	}
 	msg.id = top["id"]
-	if raw, ok := top["params"]; ok && msg.method == methodToolsCall {
+	if raw, ok := top["params"]; ok && gated(msg.method) {
 		if err := json.Unmarshal(raw, &msg.params); err != nil {
-			return message{}, &rpcError{http.StatusBadRequest, codeInvalidParams, "tools/call params must be an object"}
+			return message{}, &rpcError{http.StatusBadRequest, codeInvalidParams, msg.method + " params must be an object"}
 		}
 	}
 	return msg, nil
 }
 
-// toolCall is a parsed tools/call request.
+// toolCall is a parsed gated request: a tools/call, or a resources/read or
+// prompts/get, which the policy sees as a call named "resource:<uri>" or
+// "prompt:<name>". See reads.go.
 type toolCall struct {
-	name    string
+	method  string
+	name    string          // the name the policy matches
+	target  string          // what Mcp-Name must equal: the tool name, URI or prompt name
 	rawArgs json.RawMessage // exactly as sent, for hashing
 	args    map[string]any  // decoded, for policy
 	modern  bool            // carries 2026-07-28 per-request _meta
 }
 
 func parseToolCall(msg message) (toolCall, *rpcError) {
-	if len(msg.id) == 0 || string(msg.id) == "null" {
-		// Some servers might run a tools/call sent as a notification, so we
-		// never let one through without a decision and an id to answer.
-		return toolCall{}, &rpcError{http.StatusBadRequest, codeInvalidRequest, "tools/call needs an id"}
-	}
 	var call toolCall
 	if err := json.Unmarshal(msg.params["name"], &call.name); err != nil || call.name == "" {
 		return toolCall{}, &rpcError{http.StatusBadRequest, codeInvalidParams, "tools/call needs params.name"}
+	}
+	call.target = call.name
+	if policy.IsRead(call.name) {
+		// Otherwise a tool named "resource:x" would be judged by the rules
+		// written for reading resources.
+		return call, &rpcError{http.StatusBadRequest, codeInvalidParams, "tool names may not start with resource: or prompt:"}
 	}
 	call.rawArgs = msg.params["arguments"]
 	if len(call.rawArgs) > 0 && string(call.rawArgs) != "null" {
@@ -111,22 +122,19 @@ func parseToolCall(msg message) (toolCall, *rpcError) {
 			return toolCall{}, &rpcError{http.StatusBadRequest, codeInvalidParams, "tools/call arguments must be an object"}
 		}
 	}
-
-	var meta map[string]json.RawMessage
-	_ = json.Unmarshal(msg.params["_meta"], &meta) // absent or odd _meta just means a legacy client
-	_, call.modern = meta[metaProtocolVersion]
 	return call, nil
 }
 
 // checkHeaders makes sure the routing headers, when sent, agree with the
 // body. Otherwise a gateway routing on headers and the server reading the
-// body could act on different tools.
+// body could act on different tools or resources. Mcp-Name carries the
+// tool name, the resource URI or the prompt name.
 func checkHeaders(h http.Header, msg message, call *toolCall) *rpcError {
 	if got := h.Get(headerMethod); got != "" && got != msg.method {
 		return &rpcError{http.StatusBadRequest, codeHeaderMismatch, "Header mismatch: " + headerMethod}
 	}
 	if call != nil {
-		if got := h.Get(headerName); got != "" && got != call.name {
+		if got := h.Get(headerName); got != "" && got != call.target {
 			return &rpcError{http.StatusBadRequest, codeHeaderMismatch, "Header mismatch: " + headerName}
 		}
 	}
@@ -188,6 +196,17 @@ func summarize(call toolCall) string {
 	}
 	sort.Strings(keys)
 	return call.name + " with " + strings.Join(keys, ", ")
+}
+
+// refuse answers a call that won't be forwarded. A tool call gets a tool
+// result with isError, which the agent reads and can react to. Reads have no
+// such result, so they get a JSON-RPC error carrying the same sentence.
+func refuse(w http.ResponseWriter, msg message, call toolCall, text string) {
+	if call.isTool() {
+		writeJSON(w, http.StatusOK, toolErrorResult(msg.id, call.modern, text))
+		return
+	}
+	writeJSON(w, http.StatusOK, errorResponse(msg.id, codeRefused, text))
 }
 
 // toolErrorResult builds a tools/call result with isError true. A result,

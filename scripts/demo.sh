@@ -29,6 +29,20 @@ call() {
     | pretty
 }
 
+# read <uri>: one MCP resources/read.
+read_resource() {
+  local uri="$1"
+  curl -sS "$PROXY/mcp" \
+    -H "Authorization: Bearer $AGENT_KEY" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "MCP-Protocol-Version: $VERSION" \
+    -H "Mcp-Method: resources/read" \
+    -H "Mcp-Name: $uri" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"$uri\",\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"$VERSION\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}" \
+    | pretty
+}
+
 step() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 
 step "1. ALLOWED: \$20 refund (rule small-refunds) goes through to the mock"
@@ -43,10 +57,16 @@ call payments.refund '{"charge_id":"ch_123","amount":5000}'
 step "4. ALLOWED: notes.read is a read tool, allowed by default"
 call notes.read '{"note_id":"refund-policy"}'
 
-step "5. REJECTED: a smuggled second amount is refused before policy runs"
+step "5. ALLOWED: reading the resource note://welcome; unlisted reads are allowed, and audited"
+read_resource note://welcome
+
+step "6. DENIED: reading note://refund-policy (rule refund-policy-is-internal)"
+read_resource note://refund-policy
+
+step "7. REJECTED: a smuggled second amount is refused before policy runs"
 curl -sS "$PROXY/mcp" -H "Authorization: Bearer $AGENT_KEY" -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"payments.refund","arguments":{"amount":10,"Amount":5000}}}' \
   | pretty
 
-step "6. The audit log (newest first; no argument values, only hashes)"
+step "8. The audit log (newest first; no argument values, only hashes)"
 curl -sS "$PROXY/v1/audit" -H "Authorization: Bearer $ADMIN_TOKEN" | pretty

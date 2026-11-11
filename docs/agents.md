@@ -31,7 +31,7 @@ async with http, Client(streamable_http_client("https://consequence-os.example/m
 
 A runnable version is in [examples/python-agent](../examples/python-agent/agent.py). Any MCP client that speaks Streamable HTTP works: revision 2026-07-28, or older clients that use `initialize`.
 
-Only `tools/call` is checked. Everything else, such as `tools/list` and notifications, passes through unchanged.
+`tools/call`, `resources/read` and `prompts/get` are checked. Everything else, such as `tools/list` and notifications, passes through unchanged.
 
 ## 3. Handle the three outcomes
 
@@ -42,6 +42,9 @@ A tool call comes back in one of three ways:
 | **Allowed** | The tool's normal result | Carry on. |
 | **Blocked** by policy | A tool error (`isError: true`) starting `Blocked by ConsequenceOS: policy rule "…"` | Don't retry. Tell the user it isn't allowed. |
 | **Held** for a human | A tool error starting `Approval pending`, with an approval ID and a status link | Tell the user it's waiting for approval and share the link. Once it's approved, retry the **exact same call** with the same arguments. It goes through once. |
+| **Refused** because too many are waiting | A tool error starting `Refused by ConsequenceOS: this agent already has … requests waiting` | Don't retry this or similar calls. Tell the user requests are waiting for their decision. |
+
+Reads come back the same way, except that a blocked or held `resources/read` or `prompts/get` is a JSON-RPC error with code `-32030`, not a tool result. Its message starts with the same words.
 
 Some details about held calls:
 
@@ -64,6 +67,6 @@ The messages are written so a language model can act on them as they are. If you
 |---|---|
 | `401` | Missing or wrong API key. |
 | `403` | The request came from a browser page whose origin isn't in `allowed_origins`. |
-| `400` | The request was malformed or ambiguous, or its MCP headers don't match its body. Fix the request. |
+| `400` | The request was malformed or ambiguous, or its MCP headers don't match its body. A resource URI with `.` or `..` segments or percent-encoded letters is refused too. Fix the request. |
 | `502` | The tool server is down. |
 | `503` | The audit log, approvals, usage limits or receipt signing are unavailable. ConsequenceOS fails closed, so nothing was forwarded and you can retry later. |

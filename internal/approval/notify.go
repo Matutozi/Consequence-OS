@@ -171,7 +171,7 @@ func buildMessage(from string, n Notice, now time.Time) ([]byte, error) {
 	a := n.Approval
 	// Strip line breaks so nothing in an ID can start a new header.
 	subject := strings.NewReplacer("\r", " ", "\n", " ").Replace(
-		fmt.Sprintf("Approval needed: %s wants to run %s", a.AgentID, a.Tool))
+		fmt.Sprintf("Approval needed: %s wants to %s", a.AgentID, wants(a)))
 	id := make([]byte, 8)
 	_, _ = rand.Read(id)
 	domain := from[strings.LastIndex(from, "@")+1:]

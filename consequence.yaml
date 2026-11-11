@@ -5,6 +5,7 @@ listen: "127.0.0.1:8080"
 upstream: "http://127.0.0.1:9090/mcp"
 approval_validity: 10m   # how long an approval stays usable once granted
 approval_timeout: 1h     # how long a held call waits for a decision
+max_pending_approvals: 20  # per agent; past this, new asks are refused, not emailed
 
 # Token for owner endpoints such as GET /v1/audit.
 admin_token_env: CONSEQUENCE_ADMIN_TOKEN
@@ -92,4 +93,11 @@ rules:
     action: ask
   - name: no-prod-deletes
     tool: db.delete*
+    action: deny
+  # Reads go past the policy too: resources/read as resource:<uri>, and
+  # prompts/get as prompt:<name>. Unlisted ones are allowed, and audited.
+  # In patterns, * matches across "/", so "resource:file:///etc/*" covers
+  # everything under /etc.
+  - name: refund-policy-is-internal
+    tool: "resource:note://refund-policy"
     action: deny

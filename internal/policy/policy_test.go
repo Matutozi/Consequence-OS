@@ -124,6 +124,15 @@ func TestMatchTool(t *testing.T) {
 		{"db.delete*", "db.delete_all", true},
 		{"*", "anything.at.all", true},
 		{"notes.?ead", "notes.read", true},
+		// * and ? match "/" too, so globs work on resource URIs.
+		{"*", "resource:file:///etc/passwd", true},
+		{"resource:*", "resource:file:///etc/ssl/certs/ca.pem", true},
+		{"resource:file:///etc/*", "resource:file:///etc/ssl/certs/ca.pem", true},
+		{"resource:file:///etc/*", "resource:file:///etcetera", false},
+		{"resource:file:///etc/*", "prompt:file:///etc/x", false},
+		{"resource:file:///a?b", "resource:file:///a/b", true},
+		{"resource:file:///a[^/]b", "resource:file:///a/b", false}, // a class can still exclude "/"
+		{"prompt:review-*", "prompt:review-pr", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.pattern+"~"+tt.tool, func(t *testing.T) {
@@ -152,6 +161,7 @@ func TestNewEngineRejectsBadConfig(t *testing.T) {
 		{"lte with string", []Rule{{Name: "r", Tool: "x", When: Conditions{{Arg: "a", Op: OpLte, Value: "fifty"}}, Action: ActionAllow}}, nil, "numeric value"},
 		{"eq with list", []Rule{{Name: "r", Tool: "x", When: Conditions{{Arg: "a", Op: OpEq, Value: []any{1}}}, Action: ActionAllow}}, nil, "must be a number"},
 		{"bad level", nil, Levels{"x": "dangerous"}, "unknown level"},
+		{"NUL in pattern", []Rule{{Name: "r", Tool: "a\x00b", Action: ActionAllow}}, nil, "bad tool pattern"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -160,5 +170,44 @@ func TestNewEngineRejectsBadConfig(t *testing.T) {
 				t.Errorf("NewEngine error = %v, want it to contain %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestReadsDefaultToReadLevel(t *testing.T) {
+	levels := Levels{"resource:file:///secrets/key": LevelIrreversible, "notes.read": LevelRead}
+	tests := []struct {
+		name string
+		want Level
+	}{
+		{"resource:file:///notes/welcome", LevelRead},
+		{"prompt:summarize", LevelRead},
+		{"resource:file:///secrets/key", LevelIrreversible}, // a listed level wins
+		{"notes.read", LevelRead},
+		{"rockets.launch", LevelIrreversible},
+		{"resources.launch", LevelIrreversible}, // only the exact prefix counts
+	}
+	for _, tt := range tests {
+		if got := levels.For(tt.name); got != tt.want {
+			t.Errorf("For(%q) = %s, want %s", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestCatchAllRulesCoverReads(t *testing.T) {
+	engine, err := NewEngine([]Rule{
+		{Name: "public-notes", Tool: "resource:file:///notes/*", Action: ActionAllow},
+		{Name: "nothing-else", Tool: "*", Action: ActionDeny},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for tool, want := range map[string]string{
+		"resource:file:///notes/a/b.md": "public-notes",
+		"resource:file:///etc/passwd":   "nothing-else",
+		"prompt:summarize":              "nothing-else",
+	} {
+		if got := evaluate(t, engine, tool, nil); got.Rule != want {
+			t.Errorf("%s: rule %q, want %q", tool, got.Rule, want)
+		}
 	}
 }

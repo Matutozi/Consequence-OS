@@ -354,6 +354,49 @@ func TestExpireApprovals(t *testing.T) {
 	})
 }
 
+func TestCountPendingApprovals(t *testing.T) {
+	forEachStore(t, func(t *testing.T, st Store) {
+		ctx := context.Background()
+		open := pendingApproval("apr_open", "h1")
+		open.ExpiresAt = at.Add(time.Hour)
+		forever := pendingApproval("apr_forever", "h2") // no deadline still counts
+		overdue := pendingApproval("apr_overdue", "h3")
+		overdue.ExpiresAt = at.Add(time.Minute)
+		decided := pendingApproval("apr_decided", "h4")
+		other := pendingApproval("apr_other", "h5")
+		other.AgentID = "another-bot"
+		for _, a := range []approval.Approval{open, forever, overdue, decided, other} {
+			if err := st.CreateApproval(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := st.DecideApproval(ctx, "apr_decided", approval.StatusApproved, "ada@acme.example", at, at.Add(10*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+
+		tests := []struct {
+			agent string
+			now   time.Time
+			want  int
+		}{
+			{"bot", at, 3},                  // open, forever, overdue (not yet due)
+			{"bot", at.Add(time.Minute), 2}, // overdue stops counting at its deadline
+			{"bot", at.Add(time.Hour), 1},   // only the one with no deadline is left
+			{"another-bot", at, 1},          // counts are per agent
+			{"nobody", at, 0},
+		}
+		for _, tt := range tests {
+			n, err := st.CountPendingApprovals(ctx, tt.agent, tt.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n != tt.want {
+				t.Errorf("CountPendingApprovals(%s, %s) = %d, want %d", tt.agent, tt.now.Sub(at), n, tt.want)
+			}
+		}
+	})
+}
+
 func TestPruneUsedReceipts(t *testing.T) {
 	forEachStore(t, func(t *testing.T, st Store) {
 		ctx := context.Background()

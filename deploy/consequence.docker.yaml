@@ -6,6 +6,7 @@ public_url: "http://localhost:8080"      # what links in emails point at
 upstream: "http://mockmcp:9090/mcp"
 approval_validity: 10m   # how long an approval stays usable once granted
 approval_timeout: 1h     # how long a held call waits for a decision
+max_pending_approvals: 20  # per agent; past this, new asks are refused, not emailed
 
 admin_token_env: CONSEQUENCE_ADMIN_TOKEN
 allowed_origins: []

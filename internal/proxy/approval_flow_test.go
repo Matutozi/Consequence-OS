@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -96,13 +97,14 @@ func TestApprovalFlow(t *testing.T) {
 		t.Fatal("approval was used twice")
 	}
 
-	// The audit log tells the whole story, newest first.
+	// The audit log tells the whole story, newest first, including the
+	// approver's decision.
 	entries, _ := f.store.ListAudit(context.Background(), audit.Filter{})
 	var outcomes []string
 	for _, e := range entries {
 		outcomes = append(outcomes, string(e.Outcome))
 	}
-	if got, want := strings.Join(outcomes, ","), "held,forwarded,held,held,held"; got != want {
+	if got, want := strings.Join(outcomes, ","), "held,forwarded,approved,held,held,held"; got != want {
 		t.Errorf("audit outcomes = %s, want %s", got, want)
 	}
 }
@@ -179,5 +181,39 @@ func TestConcurrentRetriesUseApprovalOnce(t *testing.T) {
 	wg.Wait()
 	if f.up.count() != 1 {
 		t.Errorf("forwarded %d times, want exactly 1", f.up.count())
+	}
+}
+
+func TestTooManyPendingApprovalsAreRefused(t *testing.T) {
+	f := newFixture(t, nil)
+	refund := func(n int) string {
+		return call("payments.refund", `{"charge_id":"ch_`+strconv.Itoa(n)+`","amount":5000}`)
+	}
+	for n := range f.approvals.MaxPending() {
+		if body := f.do(http.MethodPost, refund(n), nil).Body.String(); !strings.Contains(body, "Approval pending") {
+			t.Fatalf("call %d: %s", n+1, body)
+		}
+	}
+	links := strings.Count(f.approvalLog.String(), "?token=")
+
+	// One argument changed again: refused, not held, and nobody is notified.
+	body := f.do(http.MethodPost, refund(999), nil).Body.String()
+	if !strings.Contains(body, `"isError":true`) || !strings.Contains(body, "already has 20 requests waiting") || strings.Contains(body, "apr_") {
+		t.Errorf("over the cap: %s", body)
+	}
+	if got := strings.Count(f.approvalLog.String(), "?token="); got != links {
+		t.Errorf("approver links went from %d to %d, want no new ones", links, got)
+	}
+	if f.up.count() != 0 {
+		t.Errorf("forwarded %d calls, want 0", f.up.count())
+	}
+	entries, _ := f.store.ListAudit(context.Background(), audit.Filter{Limit: 1})
+	if e := entries[0]; e.Outcome != audit.OutcomeBlocked || e.Detail != "too many pending approvals" || e.Decision != "ask" {
+		t.Errorf("audit entry = %+v, want blocked, too many pending approvals", e)
+	}
+
+	// Retrying one that is already waiting still gets the pending answer.
+	if body := f.do(http.MethodPost, refund(0), nil).Body.String(); !strings.Contains(body, "Approval pending") {
+		t.Errorf("retry of a waiting call: %s", body)
 	}
 }

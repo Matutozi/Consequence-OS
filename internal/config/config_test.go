@@ -73,6 +73,7 @@ func TestParseValid(t *testing.T) {
 		{"default listen", cfg.Listen, DefaultListen},
 		{"default validity", cfg.ApprovalValidity, 10 * time.Minute},
 		{"default timeout", cfg.ApprovalTimeout, time.Hour},
+		{"default pending cap", cfg.MaxPendingApprovals, DefaultMaxPending},
 		{"no receivers by default", len(cfg.Receivers), 0},
 		{"default receipt ttl", cfg.Receipts.TTL, 5 * time.Minute},
 		{"api key resolved", cfg.Agents[0].APIKey, "secret-1"},
@@ -104,7 +105,7 @@ func TestParseValid(t *testing.T) {
 }
 
 func TestParseOverrides(t *testing.T) {
-	yml := validYAML + "listen: \":9999\"\napproval_validity: 90s\napproval_timeout: 2h\ndatabase_url_env: DB\n" +
+	yml := validYAML + "listen: \":9999\"\napproval_validity: 90s\napproval_timeout: 2h\nmax_pending_approvals: 5\ndatabase_url_env: DB\n" +
 		"email: { smtp_url_env: SMTP, from: approvals@acme.example }\n" +
 		"receivers: [{ id: payments-api, api_key_env: RECV }]\n"
 	cfg, err := Parse([]byte(yml), baseEnv(map[string]string{"KEY_SUPPORT": "k", "DB": "postgres://x", "SMTP": "smtp://mailpit:1025", "RECV": "r"}))
@@ -119,6 +120,9 @@ func TestParseOverrides(t *testing.T) {
 	}
 	if cfg.ApprovalTimeout != 2*time.Hour {
 		t.Errorf("approval_timeout = %v", cfg.ApprovalTimeout)
+	}
+	if cfg.MaxPendingApprovals != 5 {
+		t.Errorf("max_pending_approvals = %d", cfg.MaxPendingApprovals)
 	}
 	if got := cfg.ReceiverKeys(); len(got) != 1 || got["r"] != "payments-api" {
 		t.Errorf("receiver keys = %v", got)
@@ -162,6 +166,7 @@ func TestParseErrors(t *testing.T) {
 		{"duplicate key", ok + agentA + "  - { id: b, owner_id: o, api_key_env: KEY_DUP }\n", "already used"},
 		{"agent key equals admin token", ok + "agents:\n  - { id: a, owner_id: o, api_key_env: ADMIN }\n", "already used by the admin token"},
 		{"negative timeout", ok + agentA + "approval_timeout: -1m\n", "approval_timeout must be positive"},
+		{"negative pending cap", ok + agentA + "max_pending_approvals: -1\n", "max_pending_approvals must be positive"},
 		{"receiver env not set", ok + agentA + "receivers: [{ id: r, api_key_env: NOPE }]\n", `receiver "r": env var NOPE is not set`},
 		{"receiver without env", ok + agentA + "receivers: [{ id: r }]\n", `receiver "r": api_key_env is required`},
 		{"receiver without id", ok + agentA + "receivers: [{ api_key_env: RECV }]\n", "every receiver needs an id"},

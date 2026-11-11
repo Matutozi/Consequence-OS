@@ -302,6 +302,19 @@ func (p *Postgres) UseApproval(ctx context.Context, id string, at time.Time) (ap
 	return a, err
 }
 
+// CountPendingApprovals implements approval.Repository. The approvals_lookup
+// index starts with agent_id, so this reads only this agent's rows.
+func (p *Postgres) CountPendingApprovals(ctx context.Context, agentID string, now time.Time) (int, error) {
+	var n int
+	err := p.pool.QueryRow(ctx, `SELECT count(*) FROM approvals
+		WHERE agent_id = $1 AND status = 'pending' AND (expires_at IS NULL OR expires_at > $2)`,
+		agentID, now).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: count pending approvals: %w", err)
+	}
+	return n, nil
+}
+
 // ExpireApprovals implements approval.Repository. One UPDATE both finds and
 // changes the rows, so two servers can't both expire the same approval.
 func (p *Postgres) ExpireApprovals(ctx context.Context, now time.Time) ([]approval.Approval, error) {

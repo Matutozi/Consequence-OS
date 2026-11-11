@@ -1,5 +1,6 @@
 // Command mockmcp is a fake upstream MCP server with two tools,
-// payments.refund and notes.read, used to exercise the proxy.
+// payments.refund and notes.read, used to exercise the proxy. The notes are
+// also served as resources, note://welcome and note://refund-policy.
 //
 // With -require-receipts it also plays the receiver's part: every tool call
 // must carry a valid ConsequenceOS receipt, checked with one call to

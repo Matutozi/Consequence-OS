@@ -71,6 +71,19 @@ func (m *Memory) UseApproval(_ context.Context, id string, at time.Time) (approv
 	return *a, nil
 }
 
+// CountPendingApprovals implements approval.Repository.
+func (m *Memory) CountPendingApprovals(_ context.Context, agentID string, now time.Time) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, a := range m.approvals {
+		if a.AgentID == agentID && a.Status == approval.StatusPending && !a.Overdue(now) {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // ExpireApprovals implements approval.Repository.
 func (m *Memory) ExpireApprovals(_ context.Context, now time.Time) ([]approval.Approval, error) {
 	m.mu.Lock()

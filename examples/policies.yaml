@@ -107,6 +107,24 @@ rules:
     tool: files.delete
     action: ask
 
+  # --- Reading -------------------------------------------------------------
+  # resources/read is checked as resource:<uri> and prompts/get as
+  # prompt:<name>. Unlisted ones are allowed by default, and audited. In
+  # patterns, * matches across "/", so these cover whole directory trees.
+  - name: no-secrets-files
+    tool: "resource:file:///*.env"
+    action: deny
+  - name: no-system-files
+    tool: "resource:file:///etc/*"
+    action: deny
+  - name: customer-records-need-review
+    tool: "resource:postgres://*/customers/*"
+    action: ask
+  - name: bulk-reads-capped
+    tool: "resource:*"
+    limit: { max: 500, per: 1h }
+    action: ask
+
   # --- Money -------------------------------------------------------------
   - name: refund-daily-total
     tool: payments.refund

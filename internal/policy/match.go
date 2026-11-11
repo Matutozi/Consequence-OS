@@ -139,16 +139,30 @@ func (c Condition) matches(args map[string]any) bool {
 
 // matchTool reports whether tool matches a glob pattern such as "db.delete*".
 // Patterns are checked when the engine is built, so the error is ignored here.
+//
+// In path.Match, * and ? never match "/". Tool names have no slashes, but
+// resource URIs are full of them, so "resource:*" or a catch-all "*" would
+// miss nearly every read and let it fall through to the default. To make *
+// and ? match "/" as well, both sides swap "/" for NUL first. NUL can't
+// clash: NewEngine refuses it in patterns, and the proxy in names.
 func matchTool(pattern, tool string) bool {
-	ok, _ := path.Match(pattern, tool)
+	ok, _ := path.Match(slashless(pattern), slashless(tool))
 	return ok
 }
 
 func validPattern(pattern string) bool {
+	if strings.ContainsRune(pattern, 0) {
+		return false
+	}
 	// path.Match only reports a bad pattern when it actually parses it,
 	// so matching against an empty string is the cheap way to check.
-	_, err := path.Match(pattern, "")
+	_, err := path.Match(slashless(pattern), "")
 	return err == nil
+}
+
+// slashless replaces "/" with NUL. It doesn't copy a string with no slashes.
+func slashless(s string) string {
+	return strings.ReplaceAll(s, "/", "\x00")
 }
 
 func inList(v any, items []any, fold bool) bool {

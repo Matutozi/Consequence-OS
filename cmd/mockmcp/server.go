@@ -28,7 +28,7 @@ const (
 
 // cacheableMethods return a CacheableResult in 2026-07-28, which must carry
 // ttlMs and cacheScope (schema/2026-07-28: DiscoverResult, ListToolsResult).
-var cacheableMethods = map[string]bool{"server/discover": true, "tools/list": true}
+var cacheableMethods = map[string]bool{"server/discover": true, "tools/list": true, "resources/list": true}
 
 // legacyVersions are the pre-2026 revisions we answer initialize for, newest first.
 var legacyVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26"}
@@ -176,7 +176,7 @@ func (s *Server) handle(r *http.Request, msg message) reply {
 	case "server/discover":
 		rep = ok(map[string]any{
 			"supportedVersions": append([]string{versionModern}, legacyVersions...),
-			"capabilities":      map[string]any{"tools": map[string]any{}},
+			"capabilities":      map[string]any{"tools": map[string]any{}, "resources": map[string]any{}},
 		})
 	case "ping":
 		rep = ok(map[string]any{})
@@ -184,6 +184,10 @@ func (s *Server) handle(r *http.Request, msg message) reply {
 		rep = s.listTools()
 	case "tools/call":
 		rep = s.callTool(r, msg.Params)
+	case "resources/list":
+		rep = listResources()
+	case "resources/read":
+		rep = readResource(msg.Params)
 	default:
 		status := http.StatusOK
 		if modern {
@@ -219,7 +223,7 @@ func (s *Server) initialize(params json.RawMessage) reply {
 	}
 	return ok(map[string]any{
 		"protocolVersion": version,
-		"capabilities":    map[string]any{"tools": map[string]any{}},
+		"capabilities":    map[string]any{"tools": map[string]any{}, "resources": map[string]any{}},
 		"serverInfo":      serverInfo,
 	})
 }
@@ -282,12 +286,18 @@ func checkModern(r *http.Request, msg message, meta map[string]json.RawMessage) 
 	if got := r.Header.Get(headerMethod); got != msg.Method {
 		return fail(http.StatusBadRequest, codeHeaderMismatch, "Header mismatch: "+headerMethod), true
 	}
-	if msg.Method == "tools/call" {
+	if msg.Method == "tools/call" || msg.Method == "resources/read" {
+		// Mcp-Name carries the tool name, or the URI of the resource read.
 		var p struct {
 			Name string `json:"name"`
+			URI  string `json:"uri"`
 		}
 		_ = json.Unmarshal(msg.Params, &p)
-		if r.Header.Get(headerName) != p.Name {
+		want := p.Name
+		if msg.Method == "resources/read" {
+			want = p.URI
+		}
+		if r.Header.Get(headerName) != want {
 			return fail(http.StatusBadRequest, codeHeaderMismatch, "Header mismatch: "+headerName), true
 		}
 	}
