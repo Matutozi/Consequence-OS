@@ -1,6 +1,6 @@
 // Package proxy is Guard 1: it sits between an agent and the upstream MCP
 // server, passes ordinary traffic through untouched, and runs every
-// tools/call past the policy engine first.
+// tools/call, resources/read and prompts/get past the policy engine first.
 package proxy
 
 import (
@@ -119,7 +119,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, rerr.status, errorResponse(nil, rerr.code, rerr.message))
 		return
 	}
-	if msg.method != methodToolsCall {
+	if !gated(msg.method) {
 		if rerr := checkHeaders(r.Header, msg, nil); rerr != nil {
 			writeJSON(w, rerr.status, errorResponse(msg.id, rerr.code, rerr.message))
 			return
@@ -127,13 +127,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.forward(w, r, body)
 		return
 	}
-	p.handleToolCall(w, r, agent, msg, body)
+	p.handleCall(w, r, agent, msg, body)
 }
 
-func (p *Proxy) handleToolCall(w http.ResponseWriter, r *http.Request, agent config.Agent, msg message, body []byte) {
+// handleCall decides a gated request. Tool calls and reads take the same
+// path: limits, deny, ask and the audit log all apply to both. Only allowed
+// tool calls get a receipt.
+func (p *Proxy) handleCall(w http.ResponseWriter, r *http.Request, agent config.Agent, msg message, body []byte) {
 	entry := audit.Entry{Time: p.now().UTC(), AgentID: agent.ID, OwnerID: agent.OwnerID}
 
-	call, rerr := parseToolCall(msg)
+	call, rerr := parseCall(msg)
 	if rerr == nil {
 		rerr = checkHeaders(r.Header, msg, &call)
 	}
@@ -171,13 +174,13 @@ func (p *Proxy) handleToolCall(w http.ResponseWriter, r *http.Request, agent con
 
 	switch decision.Action {
 	case policy.ActionAllow:
-		p.forwardWithReceipt(w, r, msg, pc, entry, "", body, release)
+		p.forwardAllowed(w, r, msg, call, pc, entry, "", body, release)
 
 	case policy.ActionDeny:
 		entry.Outcome = audit.OutcomeBlocked
 		_ = p.record(r.Context(), entry) // the call is refused whether or not this succeeds
-		text := fmt.Sprintf("Blocked by ConsequenceOS: policy rule %q does not allow %s. Do not retry this call.", decision.Rule, call.name)
-		writeJSON(w, http.StatusOK, toolErrorResult(msg.id, call.modern, text))
+		text := fmt.Sprintf("Blocked by ConsequenceOS: policy rule %q does not allow %s. Do not retry this call.", decision.Rule, call.what())
+		refuse(w, msg, call, text)
 
 	default: // ActionAsk
 		p.handleAsk(w, r, msg, call, pc, entry, body, release)
@@ -200,6 +203,17 @@ func (p *Proxy) handleAsk(w http.ResponseWriter, r *http.Request, msg message, c
 		AgentID: entry.AgentID, OwnerID: entry.OwnerID, Tool: entry.Tool, ParamsHash: entry.ParamsHash,
 		Summary: entry.Summary, Arguments: canonical, Level: entry.Level, Rule: entry.Rule,
 	})
+	if errors.Is(err, approval.ErrTooManyPending) {
+		// Refused, not held: holding it would email the approvers yet again.
+		entry.Outcome, entry.Detail = audit.OutcomeBlocked, "too many pending approvals"
+		_ = p.record(r.Context(), entry)
+		text := fmt.Sprintf("Refused by ConsequenceOS: this agent already has %d requests waiting for a human to approve, "+
+			"the most allowed, so %s was not sent for approval. Do not retry it or similar calls now. "+
+			"Tell the user requests are waiting for their decision, and try again after they decide.",
+			p.approvals.MaxPending(), call.what())
+		refuse(w, msg, call, text)
+		return
+	}
 	if err != nil {
 		p.log.Error("approval check failed", "tool", entry.Tool, "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, "approvals unavailable; call not forwarded"))
@@ -210,13 +224,13 @@ func (p *Proxy) handleAsk(w http.ResponseWriter, r *http.Request, msg message, c
 
 	switch res.State {
 	case approval.StateApproved:
-		p.forwardWithReceipt(w, r, msg, pc, entry, a.DecidedBy, body, release)
+		p.forwardAllowed(w, r, msg, call, pc, entry, a.DecidedBy, body, release)
 
 	case approval.StateRejected:
 		entry.Outcome = audit.OutcomeDeclined
 		_ = p.record(r.Context(), entry)
-		text := fmt.Sprintf("Rejected: an approver declined this %s call (approval %s). Do not retry it; tell the user it was declined.", call.name, a.ID)
-		writeJSON(w, http.StatusOK, toolErrorResult(msg.id, call.modern, text))
+		text := fmt.Sprintf("Rejected: an approver declined %s (approval %s). Do not retry it; tell the user it was declined.", call.what(), a.ID)
+		refuse(w, msg, call, text)
 
 	default: // StatePending
 		entry.Outcome = audit.OutcomeHeld
@@ -225,12 +239,45 @@ func (p *Proxy) handleAsk(w http.ResponseWriter, r *http.Request, msg message, c
 			"Approval ID: %s. Status: %s . "+
 			"Tell the user this action is waiting for approval. Once it is approved, retry this exact call "+
 			"with the same arguments within %s; it will then go through once.",
-			call.name, entry.Rule, a.ID, p.approvals.StatusURL(a.ID), approval.HumanDuration(p.approvals.Validity()))
+			call.what(), entry.Rule, a.ID, p.approvals.StatusURL(a.ID), approval.HumanDuration(p.approvals.Validity()))
 		if !a.ExpiresAt.IsZero() {
 			text += fmt.Sprintf(" If nobody decides by %s, the request expires.", a.ExpiresAt.Format(time.RFC3339))
 		}
-		writeJSON(w, http.StatusOK, toolErrorResult(msg.id, call.modern, text))
+		refuse(w, msg, call, text)
 	}
+}
+
+// forwardAllowed forwards an allowed or approved call. Tool calls carry a
+// receipt; reads don't, because receipts are for actions and receivers
+// check only tools/call.
+func (p *Proxy) forwardAllowed(w http.ResponseWriter, r *http.Request, msg message, call toolCall, pc policy.Call, entry audit.Entry, approvedBy string, body []byte, release func()) {
+	if call.isTool() {
+		p.forwardWithReceipt(w, r, msg, pc, entry, approvedBy, body, release)
+		return
+	}
+	if !p.count(w, r, msg, pc, entry) {
+		return
+	}
+	entry.Outcome = audit.OutcomeForwarded
+	if err := p.record(r.Context(), entry); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, "audit log unavailable; call not forwarded"))
+		return
+	}
+	release()
+	p.forward(w, r, body)
+}
+
+// count records the call's usage for every limit scope that covers it. On
+// failure it answers the agent and returns false: nothing goes uncounted.
+func (p *Proxy) count(w http.ResponseWriter, r *http.Request, msg message, pc policy.Call, entry audit.Entry) bool {
+	for _, u := range p.engine.UsageRecords(pc) {
+		if err := p.store.RecordUsage(r.Context(), u); err != nil {
+			p.log.Error("usage write failed", "tool", entry.Tool, "scope", u.Tool, "err", err)
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, "usage log unavailable; call not forwarded"))
+			return false
+		}
+	}
+	return true
 }
 
 // forwardWithReceipt signs a receipt for an allowed or approved call, writes
@@ -260,12 +307,8 @@ func (p *Proxy) forwardWithReceipt(w http.ResponseWriter, r *http.Request, msg m
 	// Usage first: if the audit write then fails, a call is over-counted
 	// (the safe way round) rather than forwarded uncounted. Likewise if one
 	// scope's record fails after another's was saved.
-	for _, u := range p.engine.UsageRecords(pc) {
-		if err := p.store.RecordUsage(r.Context(), u); err != nil {
-			p.log.Error("usage write failed", "tool", entry.Tool, "scope", u.Tool, "err", err)
-			fail("usage log unavailable")
-			return
-		}
+	if !p.count(w, r, msg, pc, entry) {
+		return
 	}
 	entry.Outcome = audit.OutcomeForwarded
 	entry.ReceiptID = rcpt.ReceiptID
@@ -290,7 +333,7 @@ func (p *Proxy) record(ctx context.Context, e audit.Entry) error {
 		p.log.Error("audit write failed", "agent", e.AgentID, "tool", e.Tool, "err", err)
 		return err
 	}
-	p.log.Info("tools/call", "audit_id", saved.ID, "agent", e.AgentID, "tool", e.Tool,
+	p.log.Info("decision", "audit_id", saved.ID, "agent", e.AgentID, "tool", e.Tool,
 		"decision", e.Decision, "rule", e.Rule, "outcome", e.Outcome, "params_hash", e.ParamsHash,
 		"approval_id", e.ApprovalID, "receipt_id", e.ReceiptID)
 	return nil

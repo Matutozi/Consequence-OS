@@ -23,7 +23,7 @@ ConsequenceOS doesn't detect prompt injection or tell a good instruction from a 
 
 ## What it can guard
 
-Any action an agent takes through an MCP tool. ConsequenceOS doesn't know what a tool does: rules match the tool's name (globs allowed), its arguments, how much the agent has already done, and the time.
+Any action an agent takes through an MCP tool, and anything it reads through MCP resources or prompts. ConsequenceOS doesn't know what a tool does: rules match the tool's name (globs allowed), its arguments, how much the agent has already done, and the time.
 
 | Kind of action | Example rule |
 |---|---|
@@ -32,6 +32,7 @@ Any action an agent takes through an MCP tool. ConsequenceOS doesn't know what a
 | Email | Ask once `email.send` passes 50 messages an hour |
 | Infrastructure | Ask before `k8s.scale_deployment` outside office hours |
 | Money | Allow refunds up to $50, and ask once a day's total passes $2,000 |
+| Reading data | Deny reading `resource:file:///etc/*`, and ask before reading customer records |
 
 All of these, written out, are in [examples/policies.yaml](examples/policies.yaml). The quickstart below uses refunds only because they're easy to picture.
 
@@ -132,13 +133,15 @@ To stop the stack and delete its data, run `docker compose down -v`.
 
 1. The agent sends an MCP `tools/call` to `POST /mcp` with its API key.
 2. ConsequenceOS checks that the request can't be read two ways: no batches, no duplicate keys, no keys differing only in case, and envelope headers that match the body.
-3. The policy decides **allow**, **ask** or **deny**. Calls that aren't `tools/call` pass through untouched.
+3. The policy decides **allow**, **ask** or **deny**. `resources/read` and `prompts/get` are decided too (see [Reads](#reads)). Everything else, such as `tools/list`, passes through untouched.
 4. **deny**: the agent gets an error result and nothing is forwarded.
 5. **ask**: an approval is opened and each approver gets an email with their own link. The agent gets an "approval pending" result. Once someone approves, the same agent making the same call with the same arguments gets through once, within the validity window (10 minutes by default). If nobody decides within the approval timeout (1 hour by default), the request expires and the audit log records it.
 6. **allow**, or an approved retry: ConsequenceOS signs a receipt, writes the audit entry, and forwards the call. The receipt goes in the `X-Consequence-Receipt` header and in `params._meta.consequenceReceipt`.
 7. The receiver's middleware verifies the receipt with one API call before the action runs.
 
 If the audit log, the approval store or receipt signing is unavailable, the call is not forwarded.
+
+One agent can have at most `max_pending_approvals` requests waiting (20 by default). Past that, a new ask is refused instead of held, so nobody is emailed. Without the cap, an agent could open a new approval for every slightly changed argument and wear the approvers down. The refusal is audited as `blocked` with the detail `too many pending approvals`. On a busy deployment with several servers sharing one database, a burst can overshoot the cap by a few.
 
 ## Policy
 
@@ -172,6 +175,7 @@ rules:
 - **Text is matched exactly,** unless the condition says `fold: true`. Then outer spaces are ignored and letter case doesn't matter, so `"Production "` matches `production`. It works with `eq`, `ne`, `in` and `not_in`.
 - **Missing or wrong-type arguments:** if the argument is missing or the wrong type (for example the amount sent as the text `"10"`), the condition doesn't match and the next rule is checked.
 - **When nothing matches:** read tools are allowed and everything else asks.
+- **Globs:** `*` matches any run of characters and `?` any one, including `/`. So `resource:file:///etc/*` covers everything under `/etc`, and a catch-all `*` covers reads as well as tools.
 
 **Allow what you trust, rather than deny what you fear.** A rule that matches text can be skipped by a spelling it didn't expect, and the call goes on to the next rule. For an `allow` rule that's safe: the call falls through and asks. For a `deny` or `ask` rule it isn't, especially when an allow-everything rule comes after it. Add `fold: true` to those, or list the values you allow and let everything else ask. `-check` warns about deny and ask rules that depend on exact text:
 
@@ -228,9 +232,35 @@ go run ./cmd/consequenced -tool payments.refund -args '{"amount":5000}'
 # tool=payments.refund level=irreversible action=ask rule=big-refunds
 ```
 
+### Reads
+
+Reading is the first half of most data leaks, so `resources/read` and `prompts/get` go past the policy too. Rules see them as a call named `resource:` plus the URI, or `prompt:` plus the prompt's name. Prompt arguments work in conditions like a tool's.
+
+```yaml
+- name: no-secrets-files
+  tool: "resource:file:///*.env"
+  action: deny
+- name: customer-records-need-review
+  tool: "resource:postgres://*/customers/*"
+  action: ask
+```
+
+- **Unlisted reads are allowed,** because they count as level `read`. Upgrading changes nothing until you write a rule, but every read is now audited and can be denied, held or limited. A catch-all `*` rule does cover reads, so put a `resource:*` allow above it if you want reads open.
+- **Allowed reads carry no receipt.** Receipts are for actions, and receivers check only `tools/call`.
+- **A refused read is a JSON-RPC error** with code `-32030` and the same sentence a tool call would get, because reads have no error result of their own.
+- **Odd URIs are refused,** because rules match the URI as text. ConsequenceOS refuses URIs with `.` or `..` path segments, percent-encoded letters or digits, an upper-case scheme or host, spaces, control characters or backslashes, and asks for the plain form. Otherwise `file:///tmp/../etc/passwd` could get around a rule for `/etc`.
+- **Tool names can't start with `resource:` or `prompt:`.** Real MCP tool names can't contain `:` anyway, and this stops a tool from being judged by the rules for reads.
+
+What it doesn't cover:
+- **Reads through tools.** A tool like `notes.read` is a tool call, governed by its own rules. Blocking `resource:note://x` doesn't block a tool that returns the same note.
+- **What the server does with a URI.** A server that maps two different URIs to the same data, through symlinks or aliases for example, can be read through either one. Write rules for each, or allow what you trust and deny the rest.
+- **Secrets in URIs.** The audit log records the full URI, as it records a tool's name. Don't put secrets in resource URIs.
+
 ## Audit log
 
 Every decision is recorded: allowed, blocked, held, approved, declined, expired and rejected calls, each with the rule, the approver and the receipt. Entries hold a hash and a short summary of the arguments, never the raw values.
+
+An approver's decision is written to the log **before** it is saved. If the log can't take it, nothing is decided and the approver is asked to try again. If two approvers decide at once, both decisions are logged, and the one that lost gets a second entry with outcome `not_applied`. The log is append-only, so it corrects itself rather than being edited.
 
 The log is a **hash chain**. Each entry stores the previous entry's hash, and its own hash covers that link and every field. Editing, deleting or reordering an entry breaks every link after it.
 
@@ -359,6 +389,7 @@ One YAML file names everything, and secrets live in environment variables that t
 | `upstream` | The MCP server to forward to |
 | `approval_timeout` | How long a held call waits for a decision before it expires (default `1h`) |
 | `approval_validity` | How long an approval stays usable after it's granted (default `10m`) |
+| `max_pending_approvals` | How many approvals one agent may have waiting at once (default `20`). Past it, new asks are refused and nobody is emailed |
 | `admin_token_env` | Env var holding the token for `/v1/audit` |
 | `agents` | `id`, `owner_id` and `api_key_env` for each agent |
 | `receivers` | `id` and `api_key_env` for each receiver allowed to call the verify endpoint |
@@ -440,7 +471,8 @@ This is an early MVP. Built:
 - expiry for unanswered approvals, and a cleanup job for used receipts;
 - rate and spending limits, and time-window rules;
 - the FastAPI/Starlette receiver middleware;
-- a hash-chained audit log, with signed heads and a verify command.
+- a hash-chained audit log, with signed heads and a verify command;
+- policy checks on resource reads and prompts, a cap on pending approvals, and approval decisions that are always audited.
 
 Not yet:
 - passkey-signed approvals.

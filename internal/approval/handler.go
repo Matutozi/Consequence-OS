@@ -2,7 +2,6 @@ package approval
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,26 +9,22 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
-	"github.com/matutozi/consequence-os/internal/audit"
 	"github.com/matutozi/consequence-os/internal/policy"
 )
 
-// Auditor is the part of the store the handlers need to record decisions.
-type Auditor interface {
-	AppendAudit(ctx context.Context, e audit.Entry) (audit.Entry, error)
-}
-
 // Handlers serves the approval page and the decide endpoint.
 type Handlers struct {
-	svc   *Service
-	audit Auditor
-	log   *slog.Logger
+	svc *Service
+	log *slog.Logger
 }
 
-func NewHandlers(svc *Service, auditor Auditor, log *slog.Logger) *Handlers {
-	return &Handlers{svc: svc, audit: auditor, log: log}
+// NewHandlers builds the approval pages. The service records each decision
+// in the audit log before saving it.
+func NewHandlers(svc *Service, log *slog.Logger) *Handlers {
+	return &Handlers{svc: svc, log: log}
 }
 
 // Page serves GET /approvals/{id}. With ?token=<secret> it shows the
@@ -72,20 +67,7 @@ func (h *Handlers) Decide(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	h.recordDecision(r.Context(), a)
 	h.render(w, http.StatusOK, a, "", "", "")
-}
-
-func (h *Handlers) recordDecision(ctx context.Context, a Approval) {
-	outcome := audit.OutcomeApproved
-	if a.Status == StatusRejected {
-		outcome = audit.OutcomeDeclined
-	}
-	if _, err := h.audit.AppendAudit(ctx, a.AuditEntry(a.DecidedAt, outcome, "decided by "+a.DecidedBy)); err != nil {
-		// The decision itself is already saved, so only log this failure.
-		h.log.Error("audit write failed for approval decision", "approval_id", a.ID, "err", err)
-	}
-	h.log.Info("approval decided", "approval_id", a.ID, "status", a.Status, "by", a.DecidedBy, "tool", a.Tool, "agent", a.AgentID)
 }
 
 func (h *Handlers) fail(w http.ResponseWriter, err error) {
@@ -97,6 +79,8 @@ func (h *Handlers) fail(w http.ResponseWriter, err error) {
 		http.Error(w, "This approver link is not valid.", http.StatusForbidden)
 	case errors.Is(err, ErrNotPending):
 		http.Error(w, "This request has already been decided.", http.StatusConflict)
+	case errors.Is(err, ErrNotRecorded):
+		http.Error(w, "Your decision could not be recorded, so it was not made. Please try again in a moment.", http.StatusServiceUnavailable)
 	case errors.Is(err, ErrExpired):
 		http.Error(w, "This request expired before anyone decided. If the agent asks again, a new request is sent.", http.StatusGone)
 	default:
@@ -179,7 +163,22 @@ func sentence(a Approval) string {
 	if a.Level == policy.LevelIrreversible {
 		article = "an"
 	}
-	return fmt.Sprintf("%s (owned by %s) wants to run %s, %s %s action.", a.AgentID, a.OwnerID, a.Tool, article, a.Level)
+	if policy.IsRead(a.Tool) {
+		return fmt.Sprintf("%s (owned by %s) wants to %s.", a.AgentID, a.OwnerID, wants(a))
+	}
+	return fmt.Sprintf("%s (owned by %s) wants to %s, %s %s action.", a.AgentID, a.OwnerID, wants(a), article, a.Level)
+}
+
+// wants says what the agent wants to do: "run payments.refund", or for
+// reads "read file:///notes/a" or "get the prompt summarize".
+func wants(a Approval) string {
+	if uri, ok := strings.CutPrefix(a.Tool, policy.ResourcePrefix); ok {
+		return "read " + uri
+	}
+	if name, ok := strings.CutPrefix(a.Tool, policy.PromptPrefix); ok {
+		return "get the prompt " + name
+	}
+	return "run " + a.Tool
 }
 
 // argRows turns the canonical arguments into name/value rows, sorted by

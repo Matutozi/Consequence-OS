@@ -200,6 +200,37 @@ func TestServer(t *testing.T) {
 			check: wantText(true, "No note"),
 		},
 		{
+			name: "resources are listed", body: modernBody(10, "resources/list", nil),
+			headers: modernHeaders("resources/list", ""), wantStatus: 200,
+			check: func(t *testing.T, res map[string]any) {
+				list, _ := res["resources"].([]any)
+				if len(list) != 2 || list[0].(map[string]any)["uri"] != "note://refund-policy" {
+					t.Errorf("resources = %v", res["resources"])
+				}
+			},
+		},
+		{
+			name:    "a note can be read as a resource",
+			body:    modernBody(11, "resources/read", map[string]any{"uri": "note://welcome"}),
+			headers: modernHeaders("resources/read", "note://welcome"), wantStatus: 200,
+			check: func(t *testing.T, res map[string]any) {
+				contents, _ := res["contents"].([]any)
+				if len(contents) != 1 || !strings.Contains(contents[0].(map[string]any)["text"].(string), "Welcome") {
+					t.Errorf("contents = %v", res["contents"])
+				}
+			},
+		},
+		{
+			name:    "unknown resource is not found",
+			body:    modernBody(12, "resources/read", map[string]any{"uri": "note://missing"}),
+			headers: modernHeaders("resources/read", "note://missing"), wantStatus: 200, wantCode: codeResourceNotFound,
+		},
+		{
+			name:    "Mcp-Name must match the resource URI",
+			body:    modernBody(13, "resources/read", map[string]any{"uri": "note://welcome"}),
+			headers: modernHeaders("resources/read", "note://refund-policy"), wantStatus: 400, wantCode: codeHeaderMismatch,
+		},
+		{
 			name:    "unknown tool is a protocol error",
 			body:    modernBody(9, "tools/call", callParams("db.drop", nil)),
 			headers: modernHeaders("tools/call", "db.drop"), wantStatus: 200, wantCode: codeInvalidParams,

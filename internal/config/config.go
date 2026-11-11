@@ -21,6 +21,7 @@ const (
 	DefaultListen           = "127.0.0.1:8080"
 	DefaultApprovalValidity = 10 * time.Minute
 	DefaultApprovalTimeout  = time.Hour
+	DefaultMaxPending       = 20 // approvals one agent may have waiting at once
 	DefaultReceiptTTL       = 5 * time.Minute
 
 	// ListenEnv, when set, overrides the file's listen address. The Docker
@@ -34,7 +35,10 @@ type Config struct {
 	Upstream         string        `yaml:"upstream"`
 	ApprovalValidity time.Duration `yaml:"approval_validity"` // yaml.v3 parses strings like "10m"
 	ApprovalTimeout  time.Duration `yaml:"approval_timeout"`  // how long a held call waits for a decision
-	Agents           []Agent       `yaml:"agents"`
+	// MaxPendingApprovals caps how many approvals one agent may have
+	// waiting. Past it, new asks are refused instead of emailing approvers.
+	MaxPendingApprovals int     `yaml:"max_pending_approvals"`
+	Agents              []Agent `yaml:"agents"`
 
 	// Receivers may call POST /v1/receipts/verify, each with its own key.
 	// With none listed, receivers can only verify offline with the public keys.
@@ -170,6 +174,9 @@ func (c *Config) applyDefaults() {
 	if c.ApprovalTimeout == 0 {
 		c.ApprovalTimeout = DefaultApprovalTimeout
 	}
+	if c.MaxPendingApprovals == 0 {
+		c.MaxPendingApprovals = DefaultMaxPending
+	}
 	if c.Receipts.TTL == 0 {
 		c.Receipts.TTL = DefaultReceiptTTL
 	}
@@ -268,6 +275,9 @@ func (c *Config) validate() error {
 	}
 	if c.ApprovalTimeout < 0 {
 		return errors.New("approval_timeout must be positive")
+	}
+	if c.MaxPendingApprovals < 0 {
+		return errors.New("max_pending_approvals must be positive")
 	}
 	if c.Receipts.TTL < 0 {
 		return errors.New("receipts.ttl must be positive")

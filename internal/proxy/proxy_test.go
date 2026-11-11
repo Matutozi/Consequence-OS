@@ -125,7 +125,7 @@ func newFixtureWithRules(t testing.TB, st store.Store, rules []policy.Rule) fixt
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	approvalLog := &syncBuffer{}
 	svc := approval.NewService(approval.Options{
-		Repo: st, Validity: 10 * time.Minute, PublicURL: "http://cos.test",
+		Repo: st, Audit: st, Validity: 10 * time.Minute, PublicURL: "http://cos.test", MaxPending: config.DefaultMaxPending,
 		Approvers: map[string][]string{"acme": {"ada@acme.example"}},
 		Log:       slog.New(slog.NewTextHandler(approvalLog, nil)), Now: now,
 	})
@@ -444,7 +444,7 @@ func TestUpstreamDown(t *testing.T) {
 		Agents:    []config.Agent{{ID: "a", OwnerID: "o", APIKey: agentKey}},
 		Engine:    engine,
 		Store:     st,
-		Approvals: approval.NewService(approval.Options{Repo: st, Validity: time.Minute, Log: discard}),
+		Approvals: approval.NewService(approval.Options{Repo: st, Audit: st, Validity: time.Minute, Log: discard}),
 		Receipts:  testIssuer(t),
 		Log:       discard,
 	})

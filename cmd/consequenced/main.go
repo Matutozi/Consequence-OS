@@ -138,13 +138,15 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 		return err
 	}
 	approvals := approval.NewService(approval.Options{
-		Repo:      st,
-		Approvers: cfg.ApproversByOwner(),
-		Validity:  cfg.ApprovalValidity,
-		Timeout:   cfg.ApprovalTimeout,
-		PublicURL: cfg.PublicURL,
-		Notifier:  notifier,
-		Log:       log,
+		Repo:       st,
+		Audit:      st,
+		Approvers:  cfg.ApproversByOwner(),
+		Validity:   cfg.ApprovalValidity,
+		Timeout:    cfg.ApprovalTimeout,
+		MaxPending: cfg.MaxPendingApprovals,
+		PublicURL:  cfg.PublicURL,
+		Notifier:   notifier,
+		Log:        log,
 	})
 	px, err := proxy.New(proxy.Options{
 		Upstream:       cfg.Upstream,
@@ -159,7 +161,7 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 	if err != nil {
 		return err
 	}
-	pages := approval.NewHandlers(approvals, st, log)
+	pages := approval.NewHandlers(approvals, log)
 
 	// Go 1.22+ patterns can include a method and {wildcards}: "GET /approvals/{id}".
 	mux := http.NewServeMux()

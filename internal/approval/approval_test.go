@@ -34,7 +34,7 @@ func newEnv(t *testing.T) env {
 	st := store.NewMemory()
 	var log bytes.Buffer
 	svc := approval.NewService(approval.Options{
-		Repo: st, Validity: 10 * time.Minute, Timeout: time.Hour, PublicURL: "http://cos.test/",
+		Repo: st, Audit: st, Validity: 10 * time.Minute, Timeout: time.Hour, PublicURL: "http://cos.test/",
 		Approvers: map[string][]string{"acme": {"ada@acme.example", "bo@acme.example"}},
 		Log:       slog.New(slog.NewTextHandler(&log, nil)), Now: func() time.Time { return clock },
 	})
@@ -278,7 +278,7 @@ func TestHumanDuration(t *testing.T) {
 // --- HTTP handlers ---
 
 func newServer(e env) *http.ServeMux {
-	h := approval.NewHandlers(e.svc, e.store, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	h := approval.NewHandlers(e.svc, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /approvals/{id}", h.Page)
 	mux.HandleFunc("POST /approvals/{id}/decide", h.Decide)
@@ -454,5 +454,25 @@ func TestDecideExpiredIsGone(t *testing.T) {
 	newServer(e).ServeHTTP(rec, req)
 	if rec.Code != http.StatusGone || !strings.Contains(rec.Body.String(), "expired") {
 		t.Errorf("got %d %s, want 410", rec.Code, rec.Body)
+	}
+}
+
+func TestPageDescribesReads(t *testing.T) {
+	tests := []struct{ tool, want string }{
+		{"resource:file:///notes/a.md", "support-bot (owned by acme) wants to read file:///notes/a.md."},
+		{"prompt:incident-report", "support-bot (owned by acme) wants to get the prompt incident-report."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool, func(t *testing.T) {
+			e := newEnv(t)
+			req := request("1")
+			req.Tool, req.Level = tt.tool, policy.LevelRead
+			id := e.check(t, req).Approval.ID
+			rec := httptest.NewRecorder()
+			newServer(e).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/approvals/"+id, nil))
+			if !strings.Contains(rec.Body.String(), tt.want) {
+				t.Errorf("page does not say %q", tt.want)
+			}
+		})
 	}
 }
