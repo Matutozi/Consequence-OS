@@ -48,7 +48,7 @@ func VerifyHandler(c *Checker, receivers map[string]string, log *slog.Logger) ht
 			args = json.RawMessage("{}")
 		}
 
-		verified, err := c.Verify(r.Context(), receipt, req.Tool, args)
+		verified, err := c.Verify(r.Context(), receiver, receipt, req.Tool, args)
 		if err != nil {
 			reason := verify.Reason(err)
 			if reason == "invalid" { // not a receipt problem, e.g. the store is down

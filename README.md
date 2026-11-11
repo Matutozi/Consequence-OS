@@ -286,6 +286,24 @@ A receipt is a JWS in **General JSON Serialization** over an **RFC 8785 canonica
 - **Single use:** a receipt works once, and the verify endpoint records each use.
 - **Size:** a receipt is about 7.3 KB, mostly the ML-DSA-87 signature. If a proxy in front of your receiver limits headers to 8 KB (nginx's default), read it from `params._meta` instead; the middleware falls back to `_meta` automatically.
 
+### Receipt versions
+
+The server issues **v0** receipts, shown above. Receivers built from this release also accept **v1**, which adds two fields:
+
+```json
+{
+  "type": "consequenceos.receipt.v1",
+  "audience": "payments-api",
+  "consequence": { "score": 80, "reversibility": "none", "source": "config" },
+  "...": "every v0 field, unchanged"
+}
+```
+
+- **`audience`:** the receiver the call was sent to, by its ID under `receivers`. Any other receiver refuses the receipt with `wrong_audience`, so a receipt for production payments can't be spent on staging, and another receiver can't use it up.
+- **`consequence`:** how serious ConsequenceOS judged the action. `score` runs from 0 to 100. `reversibility` is `read`, `reversible`, `compensable` or `none`. `source` is `config` or `map`, and a `map` consequence also carries the `map_hash` of the map that judged it.
+
+Receivers parse receipts strictly, so a receiver from an older release refuses v1. That's why the switch takes two releases: this one teaches receivers v1, and the next one starts issuing it. Update your receivers first. If you verify offline, set `Audience` to your receiver ID now, or v1 receipts will be refused. Receivers will keep accepting v0 for at least two releases after the server stops issuing it.
+
 ### Protecting a receiver in Go
 
 ```go
@@ -300,9 +318,9 @@ mux.Handle("/mcp", guard(yourMCPServer))
 
 Inside your handler, `verify.FromContext(r.Context())` returns the verified receipt.
 
-`verify.NewClient` makes one call per tool call, to `POST /v1/receipts/verify`. That one call checks the signatures, the expiry, the tool, the arguments and single use.
+`verify.NewClient` makes one call per tool call, to `POST /v1/receipts/verify`. That one call checks the signatures, the expiry, the audience, the tool, the arguments and single use. The server knows the audience from the receiver's key.
 
-The verify endpoint needs a receiver key. Each check uses the receipt up, so without a key anyone could use receipts up before the real receiver sees them. List each receiver under `receivers` in the config, with the env var that holds its key, and give the receiver the same key. With no receivers listed, the endpoint refuses every call. To check without contacting the server, fetch the keys once with `verify.FetchKeys` and use `&verify.Offline{Keys: keys}`. Offline checking can't enforce single use, so keep your own record of used receipt IDs.
+The verify endpoint needs a receiver key. Each check uses the receipt up, so without a key anyone could use receipts up before the real receiver sees them. List each receiver under `receivers` in the config, with the env var that holds its key, and give the receiver the same key. With no receivers listed, the endpoint refuses every call. To check without contacting the server, fetch the keys once with `verify.FetchKeys` and use `&verify.Offline{Keys: keys, Audience: "payments-api"}`, with your own receiver ID. Offline checking can't enforce single use, so keep your own record of used receipt IDs.
 
 ### Protecting a receiver in Python
 
@@ -333,7 +351,7 @@ curl -s localhost:8080/v1/receipts/verify -H 'Content-Type: application/json' \
 # {"valid": true, "receipt": {...}}   or   {"valid": false, "reason": "params_mismatch", ...}
 ```
 
-The possible reasons are `malformed`, `unknown_key`, `bad_signature`, `not_canonical`, `expired`, `not_yet_valid`, `tool_mismatch`, `params_mismatch`, `already_used` and `missing`. A missing or wrong receiver key gets `401`.
+The possible reasons are `malformed`, `unknown_key`, `bad_signature`, `not_canonical`, `expired`, `not_yet_valid`, `wrong_audience`, `tool_mismatch`, `params_mismatch`, `already_used` and `missing`. A missing or wrong receiver key gets `401`.
 
 ## Endpoints
 

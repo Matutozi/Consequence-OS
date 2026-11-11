@@ -43,6 +43,7 @@ def test_valid_receipt_is_returned_and_request_is_right():
     [
         (200, {"valid": False, "reason": "params_mismatch", "message": "receipt does not match these arguments"}, "params_mismatch"),
         (200, {"valid": False, "reason": "already_used", "message": "receipt has already been used"}, "already_used"),
+        (200, {"valid": False, "reason": "wrong_audience", "message": "receipt is for a different receiver"}, "wrong_audience"),
         (401, {"valid": False, "reason": "unauthorized"}, "invalid"),
         (503, {"valid": False, "reason": "unavailable", "message": "could not verify right now"}, "unavailable"),
         (502, b"<html>bad gateway</html>", "invalid"),
@@ -53,6 +54,16 @@ def test_anything_but_a_valid_answer_is_a_rejection(status, body, reason):
     with pytest.raises(ReceiptRejected) as e:
         verify(client_answering(status, body))
     assert e.value.reason == reason
+
+
+def test_v1_receipt_fields_come_through():
+    v1 = {
+        "type": "consequenceos.receipt.v1",
+        "receipt_id": "rcpt_1",
+        "audience": "payments-api",
+        "consequence": {"score": 80, "reversibility": "none", "source": "config"},
+    }
+    assert verify(client_answering(200, {"valid": True, "receipt": v1})) == v1
 
 
 def test_unreachable_server_is_a_rejection():
