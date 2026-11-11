@@ -42,9 +42,14 @@ type Config struct {
 
 	// Receivers may call POST /v1/receipts/verify, each with its own key.
 	// With none listed, receivers can only verify offline with the public keys.
-	Receivers []Receiver    `yaml:"receivers"`
-	Tools     policy.Levels `yaml:"tools"`
-	Rules     []policy.Rule `yaml:"rules"`
+	Receivers []Receiver `yaml:"receivers"`
+
+	// UpstreamReceiver is the ID of the receiver behind upstream. Receipts
+	// then name it (receipt v1), so no other receiver accepts them. Left
+	// empty, receipts are v0 and any receiver with the tool accepts them.
+	UpstreamReceiver string        `yaml:"upstream_receiver"`
+	Tools            policy.Levels `yaml:"tools"`
+	Rules            []policy.Rule `yaml:"rules"`
 	// DefaultAllowBelow is the consequence score under which a call no rule
 	// matches is allowed. A pointer, so an explicit 0 (allow nothing by
 	// default) differs from leaving it out (policy.DefaultAllowBelow).
@@ -415,6 +420,12 @@ func (c *Config) validateKeys() error {
 		}
 		ids[r.ID] = true
 	}
+	// A receiver that verifies only offline needn't be listed, but when
+	// receivers are listed, the upstream's must be one of them: a typo would
+	// otherwise make every receipt refused with wrong_audience.
+	if c.UpstreamReceiver != "" && len(c.Receivers) > 0 && !ids[c.UpstreamReceiver] {
+		return fmt.Errorf("upstream_receiver %q is not one of the receivers", c.UpstreamReceiver)
+	}
 
 	// owner maps each secret to who uses it. Errors name env vars, never keys.
 	owner := map[string]string{c.AdminToken: "the admin token"}
@@ -436,6 +447,17 @@ func (c *Config) validateKeys() error {
 		}
 	}
 	return nil
+}
+
+// Warnings points out settings that are valid but weaker than they should
+// be. consequenced -check prints them and the server logs them at startup.
+func (c *Config) Warnings() []string {
+	var w []string
+	if c.UpstreamReceiver == "" {
+		w = append(w, "upstream_receiver is not set, so receipts are v0 and don't name their receiver: "+
+			"any receiver with the same tool would accept them. Set it to the upstream's receiver ID.")
+	}
+	return w
 }
 
 // ReceiverKeys maps each receiver's API key to its ID.

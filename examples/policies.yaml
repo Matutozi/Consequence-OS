@@ -8,6 +8,9 @@
 # (it needs the env vars named below; `make env` then `source .env` sets them).
 
 upstream: "http://127.0.0.1:9090/mcp"
+# The receiver behind upstream, which receipts name. It must match a
+# receivers entry when receivers are listed; this file lists none.
+upstream_receiver: acme-tools
 admin_token_env: CONSEQUENCE_ADMIN_TOKEN
 receipts:
   ed25519_key_env: CONSEQUENCE_SIGNING_KEY_ED25519

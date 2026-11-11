@@ -42,8 +42,11 @@ type Options struct {
 	Store     store.Store
 	Approvals *approval.Service
 	Receipts  *receipt.Issuer
-	Log       *slog.Logger
-	Now       func() time.Time // nil means time.Now; tests pass a fixed clock
+	// Receiver is the upstream's receiver ID. Set, every receipt is v1 and
+	// names it, with the call's consequence; empty, receipts are v0.
+	Receiver string
+	Log      *slog.Logger
+	Now      func() time.Time // nil means time.Now; tests pass a fixed clock
 }
 
 // Proxy implements http.Handler for the /mcp endpoint.
@@ -53,6 +56,7 @@ type Proxy struct {
 	store     store.Store
 	approvals *approval.Service
 	receipts  *receipt.Issuer
+	receiver  string
 	log       *slog.Logger
 	now       func() time.Time
 	agents    map[[32]byte]config.Agent // keyed by sha256 of the API key
@@ -73,6 +77,7 @@ func New(opts Options) (*Proxy, error) {
 		store:     opts.Store,
 		approvals: opts.Approvals,
 		receipts:  opts.Receipts,
+		receiver:  opts.Receiver,
 		log:       opts.Log,
 		now:       opts.Now,
 		agents:    make(map[[32]byte]config.Agent, len(opts.Agents)),
@@ -311,11 +316,18 @@ func (p *Proxy) forwardWithReceipt(w http.ResponseWriter, r *http.Request, msg m
 	fail := func(what string) {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, what+"; call not forwarded"))
 	}
-	encoded, rcpt, err := p.receipts.Issue(receipt.Input{
+	in := receipt.Input{
 		AgentID: entry.AgentID, OwnerID: entry.OwnerID, ApprovedBy: approvedBy,
 		Tool: entry.Tool, ParamsHash: entry.ParamsHash, Summary: entry.Summary,
 		Level: string(entry.Level), Policy: entry.Rule,
-	})
+	}
+	if p.receiver != "" {
+		// v1: the receipt names its receiver and says how serious the call is.
+		a := pc.Consequence
+		in.Audience = p.receiver
+		in.Consequence = &verify.Consequence{Score: a.Score, Reversibility: string(a.Reversibility), Source: a.Source, MapHash: a.MapHash}
+	}
+	encoded, rcpt, err := p.receipts.Issue(in)
 	if err != nil {
 		p.log.Error("receipt signing failed", "tool", entry.Tool, "err", err)
 		fail("could not sign a receipt")

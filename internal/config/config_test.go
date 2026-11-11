@@ -303,3 +303,37 @@ func TestListenOverrideAndPublicURL(t *testing.T) {
 		t.Errorf("a listen address without a port: err = %v", err)
 	}
 }
+
+func TestUpstreamReceiver(t *testing.T) {
+	ok := "upstream: http://x\n" + base + "owners: [{ id: o, approvers: [a@o.example] }]\n" +
+		"agents:\n  - { id: a, owner_id: o, api_key_env: K }\n"
+	env := baseEnv(map[string]string{"K": "k", "R": "r"})
+	listed := "receivers: [{ id: payments-api, api_key_env: R }]\n"
+	tests := []struct {
+		name, yaml, wantErr string
+		wantWarning         bool
+	}{
+		{"names a listed receiver", ok + listed + "upstream_receiver: payments-api\n", "", false},
+		{"names an unlisted receiver", ok + listed + "upstream_receiver: payments-apy\n", `upstream_receiver "payments-apy" is not one of the receivers`, false},
+		{"offline-only receiver needn't be listed", ok + "upstream_receiver: payments-api\n", "", false},
+		{"unset warns", ok + listed, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.yaml), env)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			warned := strings.Contains(strings.Join(cfg.Warnings(), "\n"), "upstream_receiver is not set")
+			if warned != tt.wantWarning {
+				t.Errorf("warned = %v, want %v", warned, tt.wantWarning)
+			}
+		})
+	}
+}
