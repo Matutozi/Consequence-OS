@@ -121,3 +121,64 @@ func TestFailsClosedWhenUsageUnavailable(t *testing.T) {
 		t.Errorf("got %d with %d forwarded, want 503 and nothing forwarded", rec.Code, f.up.count())
 	}
 }
+
+// A negative amount would lower the running total and let later calls
+// through, so it is held instead.
+func TestNegativeAmountCannotLowerASumLimit(t *testing.T) {
+	f := newFixtureWithRules(t, nil, []policy.Rule{
+		{Name: "daily-total", Tool: "payments.refund", Limit: &policy.Limit{Sum: "amount", Max: 100, Per: 24 * time.Hour}, Action: policy.ActionAsk},
+		{Name: "small-refunds", Tool: "payments.refund", When: policy.Conditions{{Arg: "amount", Op: policy.OpLte, Value: 50}}, Action: policy.ActionAllow},
+	})
+	steps := []struct{ amount, want string }{
+		{"-100000", "held"},
+		{"50", "forwarded"}, // total 50
+		{"50", "forwarded"}, // 100
+		{"50", "held"},      // would be 150: the negative call took nothing off
+	}
+	for i, s := range steps {
+		if got := f.outcome(t, refund(s.amount)); got != s.want {
+			t.Errorf("step %d, refund of %s: %s, want %s", i+1, s.amount, got, s.want)
+		}
+	}
+}
+
+// A limit on a glob covers the whole family of tools together, not each
+// tool on its own.
+func TestGlobLimitCountsTheWholeFamily(t *testing.T) {
+	f := newFixtureWithRules(t, nil, []policy.Rule{
+		{Name: "payments-daily-total", Tool: "payments.*", Limit: &policy.Limit{Sum: "amount", Max: 100, Per: 24 * time.Hour}, Action: policy.ActionAsk},
+		{Name: "payments", Tool: "payments.*", Action: policy.ActionAllow},
+	})
+	steps := []struct{ tool, want string }{
+		{"payments.refund", "forwarded"}, // total 40
+		{"payments.credit", "forwarded"}, // 80
+		{"payments.payout", "held"},      // would be 120
+		{"payments.refund", "held"},
+	}
+	for i, s := range steps {
+		if got := f.outcome(t, call(s.tool, `{"amount":40}`)); got != s.want {
+			t.Errorf("step %d, %s: %s, want %s", i+1, s.tool, got, s.want)
+		}
+	}
+}
+
+func TestParallelCallsCannotSlipUnderAGlobLimit(t *testing.T) {
+	f := newFixtureWithRules(t, nil, []policy.Rule{
+		{Name: "burst", Tool: "payments.*", Limit: &policy.Limit{Max: 3, Per: time.Hour}, Action: policy.ActionDeny},
+		{Name: "refund-burst", Tool: "payments.refund", Limit: &policy.Limit{Max: 50, Per: time.Hour}, Action: policy.ActionDeny},
+		{Name: "payments", Tool: "payments.*", Action: policy.ActionAllow},
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		tool := []string{"payments.refund", "payments.credit"}[i%2]
+		go func() {
+			defer wg.Done()
+			f.do(http.MethodPost, call(tool, `{"amount":1}`), nil)
+		}()
+	}
+	wg.Wait()
+	if n := f.up.count(); n != 3 {
+		t.Errorf("%d calls forwarded, want exactly 3", n)
+	}
+}

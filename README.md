@@ -169,8 +169,18 @@ rules:
 ```
 
 - **Operators:** `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`.
+- **Text is matched exactly,** unless the condition says `fold: true`. Then outer spaces are ignored and letter case doesn't matter, so `"Production "` matches `production`. It works with `eq`, `ne`, `in` and `not_in`.
 - **Missing or wrong-type arguments:** if the argument is missing or the wrong type (for example the amount sent as the text `"10"`), the condition doesn't match and the next rule is checked.
 - **When nothing matches:** read tools are allowed and everything else asks.
+
+**Allow what you trust, rather than deny what you fear.** A rule that matches text can be skipped by a spelling it didn't expect, and the call goes on to the next rule. For an `allow` rule that's safe: the call falls through and asks. For a `deny` or `ask` rule it isn't, especially when an allow-everything rule comes after it. Add `fold: true` to those, or list the values you allow and let everything else ask. `-check` warns about deny and ask rules that depend on exact text:
+
+```yaml
+- name: no-deletes-in-production
+  tool: db.delete_rows
+  when: { arg: environment, op: eq, value: production, fold: true }   # also "Production", " production"
+  action: deny
+```
 
 ### Limits and time windows
 
@@ -198,9 +208,11 @@ rules:
     action: ask
 ```
 
-- **`limit`** counts this agent's forwarded calls to the tool in a rolling window that ends now. It matches when this call would go over: the 11th call for `max: 10`, or a total past `max` with `sum`. Held, blocked and rejected calls don't count. Only the summed numbers are stored, never the other arguments.
+- **`limit`** counts this agent's forwarded calls to the rule's tools in a rolling window that ends now. It matches when this call would go over: the 11th call for `max: 10`, or a total past `max` with `sum`. Held, blocked and rejected calls don't count. Only the summed numbers are stored, never the other arguments.
+- **Globs count together.** A limit on `payments.*` covers refunds, credits and payouts as one total. A call also counts towards every other limit that covers it, such as one on `payments.refund` alone.
+- **Negative amounts always match** a `sum` limit, so the rule's action applies, normally `ask`. A negative amount would otherwise lower the total and make room for later calls. Totals never go down.
 - **`during`** and **`outside`** take `days` (optional, `mon` to `sun`), `hours` (optional, like `09:00-17:00`; it can run past midnight, like `22:00-06:00`) and a required `timezone`. The start time is included and the end time isn't.
-- **Concurrency:** on one server, one agent's calls to one limited tool are decided one at a time, so parallel calls can't all slip under a limit. Several servers sharing a database can overshoot by a call or two when calls arrive at the same moment.
+- **Concurrency:** on one server, one agent's calls covered by the same limit are decided one at a time, so parallel calls can't all slip under a limit. Several servers sharing a database can overshoot by a call or two when calls arrive at the same moment.
 - **Failures:** if usage can't be counted, the call isn't forwarded.
 
 To try a time window without waiting for it, pass `-at`. Limits count as if the agent had made no calls yet:

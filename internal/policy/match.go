@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strings"
 )
 
 // Op is a comparison operator used in a rule's "when" condition.
@@ -23,10 +24,16 @@ const (
 
 // Condition compares one top-level tool argument against a fixed value,
 // e.g. { arg: amount, op: lte, value: 50 } or { arg: currency, op: in, value: [USD, EUR] }.
+//
+// Text is compared exactly unless Fold is set. With fold: true, outer spaces
+// are ignored and letter case doesn't matter, so "Production " matches
+// "production". Use it on deny and ask rules, which an unexpected spelling
+// would otherwise skip.
 type Condition struct {
 	Arg   string `yaml:"arg"`
 	Op    Op     `yaml:"op"`
 	Value any    `yaml:"value"`
+	Fold  bool   `yaml:"fold,omitempty"`
 }
 
 func (c Condition) validate() error {
@@ -49,7 +56,28 @@ func (c Condition) validate() error {
 	default:
 		return fmt.Errorf("condition on %q: unknown op %q (want eq, ne, gt, gte, lt, lte, in, not_in)", c.Arg, c.Op)
 	}
+	if c.Fold && !c.comparesText() {
+		return fmt.Errorf("condition on %q: fold works only with eq, ne, in or not_in and a text value", c.Arg)
+	}
 	return nil
+}
+
+// comparesText reports whether the condition compares against text: eq or
+// ne with a string, or in or not_in with a list of strings.
+func (c Condition) comparesText() bool {
+	switch c.Op {
+	case OpEq, OpNe:
+		_, ok := c.Value.(string)
+		return ok
+	case OpIn, OpNotIn:
+		items, ok := c.Value.([]any)
+		if !ok || len(items) == 0 {
+			return false
+		}
+		_, ok = items[0].(string) // validateList keeps every item the same kind
+		return ok
+	}
+	return false
 }
 
 // validateList checks that v is a non-empty list whose items are all numbers,
@@ -79,16 +107,16 @@ func (c Condition) matches(args map[string]any) bool {
 	}
 	switch c.Op {
 	case OpEq:
-		return equal(got, c.Value)
+		return equal(got, c.Value, c.Fold)
 	case OpNe:
 		// ne still requires comparable types: a string is not "not equal" to 50.
-		return sameKind(got, c.Value) && !equal(got, c.Value)
+		return sameKind(got, c.Value) && !equal(got, c.Value, c.Fold)
 	case OpIn:
-		return inList(got, c.Value.([]any))
+		return inList(got, c.Value.([]any), c.Fold)
 	case OpNotIn:
 		// Like ne: an argument of the wrong kind is not "not in" the list.
 		items := c.Value.([]any)
-		return sameKind(got, items[0]) && !inList(got, items)
+		return sameKind(got, items[0]) && !inList(got, items, c.Fold)
 	}
 
 	a, okA := toNumber(got)
@@ -123,16 +151,18 @@ func validPattern(pattern string) bool {
 	return err == nil
 }
 
-func inList(v any, items []any) bool {
+func inList(v any, items []any, fold bool) bool {
 	for _, item := range items {
-		if equal(v, item) {
+		if equal(v, item, fold) {
 			return true
 		}
 	}
 	return false
 }
 
-func equal(a, b any) bool {
+// equal compares two scalars of the same kind. With fold, text is compared
+// without outer spaces and without regard to letter case.
+func equal(a, b any, fold bool) bool {
 	if x, ok := toNumber(a); ok {
 		y, ok := toNumber(b)
 		return ok && x == y
@@ -140,6 +170,9 @@ func equal(a, b any) bool {
 	switch x := a.(type) {
 	case string:
 		y, ok := b.(string)
+		if ok && fold {
+			return strings.EqualFold(strings.TrimSpace(x), strings.TrimSpace(y))
+		}
 		return ok && x == y
 	case bool:
 		y, ok := b.(bool)

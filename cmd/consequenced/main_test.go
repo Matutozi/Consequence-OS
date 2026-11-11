@@ -38,6 +38,50 @@ rules:
     action: allow
 `
 
+func TestCheckPrintsWarnings(t *testing.T) {
+	path := writeTestConfig(t, `
+  - name: no-prod-deletes
+    tool: db.delete_rows
+    when: { arg: environment, op: eq, value: production }
+    action: deny
+  - name: no-prod-drops
+    tool: db.drop_table
+    when: { arg: environment, op: eq, value: production, fold: true }
+    action: deny
+`)
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-config", path, "-check"}, &out); err != nil {
+		t.Fatalf("a warning must not fail -check: %v", err)
+	}
+	for _, want := range []string{
+		"warnings (1):",
+		`rule "no-prod-deletes": deny matches environment only when it is written exactly`,
+		"no-prod-drops: db.drop_table -> deny when environment eq production (any case)",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output does not contain %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestShippedConfigsHaveNoWarnings(t *testing.T) {
+	writeTestConfig(t, "") // sets the signing keys; the shipped configs name their own env vars
+	t.Setenv("CONSEQUENCE_ADMIN_TOKEN", "dev-admin")
+	t.Setenv("CONSEQUENCE_KEY_SUPPORT_BOT", "dev-key")
+	t.Setenv("CONSEQUENCE_KEY_RECEIVER_PAYMENTS", "dev-receiver")
+	t.Setenv("CONSEQUENCE_SIGNING_KEY_ED25519", os.Getenv("TEST_CONSEQUENCED_ED"))
+	t.Setenv("CONSEQUENCE_SIGNING_KEY_MLDSA87", os.Getenv("TEST_CONSEQUENCED_ML"))
+	for _, path := range []string{"../../consequence.yaml", "../../examples/policies.yaml"} {
+		var out bytes.Buffer
+		if err := run(context.Background(), []string{"-config", path, "-check"}, &out); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if strings.Contains(out.String(), "warnings (") {
+			t.Errorf("%s has policy warnings:\n%s", path, out.String())
+		}
+	}
+}
+
 func TestRun(t *testing.T) {
 	// t.Setenv restores the variable when the test ends.
 	path := writeTestConfig(t, "")

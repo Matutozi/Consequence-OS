@@ -16,7 +16,8 @@ import (
 //	limit: { max: 10, per: 24h }               # the 11th call in 24 hours matches
 //	limit: { sum: amount, max: 2000, per: 24h } # matches once the day's total would pass 2000
 //
-// Only calls that were forwarded count, per agent and per tool.
+// Only calls that were forwarded count, per agent and per rule's tool
+// pattern: a limit on payments.* covers refunds, credits and payouts together.
 type Limit struct {
 	Max float64       `yaml:"max"`
 	Per time.Duration `yaml:"per"`
@@ -38,18 +39,20 @@ func (l *Limit) validate() error {
 
 // UsageCounter reports what an agent has already done. The store implements it.
 type UsageCounter interface {
-	// CountUsage returns how many forwarded calls agentID made to tool after
+	// CountUsage returns how many forwarded calls agentID made in scope after
 	// since (not at it: a window of 1h leaves out a call exactly 1h old), and
-	// the total of argument sumArg across them ("" skips the total).
-	CountUsage(ctx context.Context, agentID, tool string, since time.Time, sumArg string) (count int, sum float64, err error)
+	// the total of argument sumArg across them ("" skips the total). A scope
+	// is a limit rule's tool pattern, such as payments.refund or payments.*.
+	CountUsage(ctx context.Context, agentID, scope string, since time.Time, sumArg string) (count int, sum float64, err error)
 }
 
 // UsageRecord is one forwarded call, saved so limits can count it later.
+// A call covered by several limit scopes is saved once per scope.
 type UsageRecord struct {
 	AgentID string
-	Tool    string
+	Tool    string // the scope counted: a limit rule's tool pattern, e.g. payments.*
 	At      time.Time
-	Values  map[string]float64 // the numeric arguments some limit sums, e.g. amount
+	Values  map[string]float64 // the numeric arguments some limit sums, e.g. amount; never negative
 }
 
 // NoUsage is a UsageCounter that has seen nothing, for dry runs like -tool.
@@ -60,8 +63,9 @@ func (NoUsage) CountUsage(context.Context, string, string, time.Time, string) (i
 	return 0, 0, nil
 }
 
-// exceeded reports whether this call would take the agent over the limit.
-func (l *Limit) exceeded(ctx context.Context, c Call, usage UsageCounter) (bool, error) {
+// exceeded reports whether this call would take the agent over the limit
+// counted in scope (the rule's tool pattern).
+func (l *Limit) exceeded(ctx context.Context, scope string, c Call, usage UsageCounter) (bool, error) {
 	if usage == nil {
 		return false, errors.New("policy: a limit rule needs a usage counter")
 	}
@@ -71,9 +75,14 @@ func (l *Limit) exceeded(ctx context.Context, c Call, usage UsageCounter) (bool,
 		if !ok {
 			return false, nil // like a condition: a missing or non-numeric argument doesn't match
 		}
+		if v < 0 {
+			// Adding a negative amount would lower the total and make room
+			// for later calls. Whatever it means to the tool, a human should see it.
+			return true, nil
+		}
 		amount = v
 	}
-	count, sum, err := usage.CountUsage(ctx, c.AgentID, c.Tool, c.At.Add(-l.Per), l.Sum)
+	count, sum, err := usage.CountUsage(ctx, c.AgentID, scope, c.At.Add(-l.Per), l.Sum)
 	if err != nil {
 		return false, fmt.Errorf("policy: count usage: %w", err)
 	}
