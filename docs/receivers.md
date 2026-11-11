@@ -8,6 +8,7 @@ For every call it allows, ConsequenceOS signs a **receipt** and attaches it to t
 
 - is signed by ConsequenceOS, with both of its keys;
 - hasn't expired (receipts last 5 minutes by default);
+- is for **this service**, when it's a v1 receipt that names its receiver;
 - is for **this tool** and **exactly these arguments**, compared by a hash of their canonical JSON;
 - hasn't been used before.
 
@@ -73,4 +74,4 @@ A receipt proves that ConsequenceOS approved these exact arguments. It can't pro
 
 ## Offline checks
 
-The Go package can also check a receipt without contacting ConsequenceOS. Fetch the public keys once from `/.well-known/consequence-keys`, then use `&verify.Offline{Keys: keys}`. It checks signatures, expiry, the tool and the arguments, but it **can't enforce single use**, so keep your own record of used receipt IDs if you rely on it.
+The Go package can also check a receipt without contacting ConsequenceOS. Fetch the public keys once from `/.well-known/consequence-keys`, then use `&verify.Offline{Keys: keys, Audience: "payments-api"}`, with the ID your service is listed under in `receivers`. Without `Audience`, v1 receipts are refused. It checks signatures, expiry, the tool and the arguments, but it **can't enforce single use**, so keep your own record of used receipt IDs if you rely on it.

@@ -83,6 +83,11 @@ type Input struct {
 	Summary    string
 	Level      string
 	Policy     string
+
+	// Audience is the receiver the call goes to. Setting it issues a v1
+	// receipt, which then also needs Consequence; leaving it empty issues v0.
+	Audience    string
+	Consequence *verify.Consequence
 }
 
 // Issuer signs receipts.
@@ -112,8 +117,17 @@ func (i *Issuer) Issue(in Input) ([]byte, verify.Receipt, error) {
 		decision = verify.DecisionHumanApproved
 	}
 	issued := i.now().UTC().Truncate(time.Second)
+	typ := verify.ReceiptType
+	switch {
+	case in.Audience != "" && in.Consequence == nil:
+		return nil, verify.Receipt{}, errors.New("receipt: a v1 receipt needs a consequence")
+	case in.Audience == "" && in.Consequence != nil:
+		return nil, verify.Receipt{}, errors.New("receipt: a consequence needs an audience (v1)")
+	case in.Audience != "":
+		typ = verify.ReceiptTypeV1
+	}
 	r := verify.Receipt{
-		Type:       verify.ReceiptType,
+		Type:       typ,
 		ReceiptID:  "rcpt_" + hex.EncodeToString(id),
 		Issuer:     i.issuer,
 		AgentID:    in.AgentID,
@@ -125,12 +139,19 @@ func (i *Issuer) Issue(in Input) ([]byte, verify.Receipt, error) {
 		Policy:     in.Policy,
 		IssuedAt:   verify.Timestamp{Time: issued},
 		ExpiresAt:  verify.Timestamp{Time: issued.Add(i.ttl)},
+
+		Audience:    in.Audience,
+		Consequence: in.Consequence,
 	}
 	encoded, err := i.sign(r)
 	return encoded, r, err
 }
 
+// sign signs r under the media type that matches its version.
 func (i *Issuer) sign(r verify.Receipt) ([]byte, error) {
+	if r.Type == verify.ReceiptTypeV1 {
+		return i.keys.signJSON(r, verify.MediaTypeV1)
+	}
 	return i.keys.signJSON(r, verify.MediaType)
 }
 
@@ -216,12 +237,17 @@ func NewChecker(keys *Keys, used UsedStore, now func() time.Time) (*Checker, err
 	return &Checker{keys: set, used: used, now: now}, nil
 }
 
-// Verify checks everything, and marks the receipt used only when every
-// other check has passed, so a bad request can't burn a good receipt.
-func (c *Checker) Verify(ctx context.Context, encoded []byte, tool string, arguments []byte) (*verify.Receipt, error) {
+// Verify checks everything for the receiver whose ID is receiver, and
+// marks the receipt used only when every other check has passed, so a bad
+// request can't burn a good receipt. That includes the audience: another
+// receiver can't use up a v1 receipt that isn't for it.
+func (c *Checker) Verify(ctx context.Context, receiver string, encoded []byte, tool string, arguments []byte) (*verify.Receipt, error) {
 	now := c.now()
 	r, err := verify.VerifyOffline(encoded, c.keys, now)
 	if err != nil {
+		return nil, err
+	}
+	if err := verify.CheckAudience(r, receiver); err != nil {
 		return nil, err
 	}
 	if err := verify.CheckAction(r, tool, arguments); err != nil {

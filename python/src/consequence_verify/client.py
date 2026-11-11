@@ -19,7 +19,8 @@ class ReceiptRejected(Exception):
     reason is a stable code, the same as the Go package and the server use:
     malformed, unknown_key, bad_signature, not_canonical, expired,
     not_yet_valid, tool_mismatch, params_mismatch, already_used, missing,
-    or invalid for anything else (such as the server being unreachable).
+    wrong_audience (a v1 receipt for another receiver), or invalid for
+    anything else (such as the server being unreachable).
     """
 
     def __init__(self, reason: str, message: str) -> None:
@@ -39,9 +40,11 @@ class Verifier(Protocol):
 class Client:
     """Checks receipts with POST /v1/receipts/verify.
 
-    This is the full check: both signatures, expiry, the tool, the exact
-    arguments, and single use. A check uses the receipt up, so call it only
-    right before the action runs.
+    This is the full check: both signatures, expiry, the audience, the
+    tool, the exact arguments, and single use. A check uses the receipt up,
+    so call it only right before the action runs. The server knows which
+    receiver is asking from api_key, and refuses a v1 receipt made out to
+    another one.
 
     api_key is this receiver's key, listed under ``receivers`` in the
     server's config.

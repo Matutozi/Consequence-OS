@@ -91,7 +91,7 @@ func TestAllowedCallCarriesReceipt(t *testing.T) {
 	}
 
 	// The receiver verifies it against what it actually received.
-	r, err := f.checker.Verify(context.Background(), []byte(got.header), got.tool, got.arguments)
+	r, err := f.checker.Verify(context.Background(), "payments-api", []byte(got.header), got.tool, got.arguments)
 	if err != nil {
 		t.Fatalf("receiver could not verify: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestAllowedCallCarriesReceipt(t *testing.T) {
 	}
 
 	// Presenting it a second time fails.
-	if _, err := f.checker.Verify(context.Background(), []byte(got.header), got.tool, got.arguments); !errors.Is(err, verify.ErrAlreadyUsed) {
+	if _, err := f.checker.Verify(context.Background(), "payments-api", []byte(got.header), got.tool, got.arguments); !errors.Is(err, verify.ErrAlreadyUsed) {
 		t.Errorf("replay: err = %v", err)
 	}
 }
@@ -120,7 +120,7 @@ func TestApprovedCallCarriesHumanReceipt(t *testing.T) {
 	f.do(http.MethodPost, refund, nil)
 
 	got := lastForwarded(t, f)
-	r, err := f.checker.Verify(context.Background(), []byte(got.header), got.tool, got.arguments)
+	r, err := f.checker.Verify(context.Background(), "payments-api", []byte(got.header), got.tool, got.arguments)
 	if err != nil {
 		t.Fatal(err)
 	}

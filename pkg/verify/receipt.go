@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -16,11 +17,20 @@ import (
 // Receipts draft has no server-issued receipt), encoded the way that draft
 // encodes records: a JWS in General JSON Serialization over an RFC 8785
 // canonical payload, signed with both Ed25519 and ML-DSA-87.
+//
+// There are two versions. v1 adds the receiver the receipt is for
+// (Audience) and how serious the action is (Consequence). Verifiers decode
+// payloads strictly, so a new field needs a new version: verifiers accept
+// both, and the server switches to v1 one release after they do.
 const (
-	ReceiptType = "consequenceos.receipt.v0"          // the payload's "type"
-	MediaType   = "vnd.consequenceos.receipt.v0+json" // each protected header's "typ"
-	AlgEd25519  = "Ed25519"                           // RFC 9864 name
-	AlgMLDSA87  = "ML-DSA-87"                         // FIPS 204, post-quantum
+	ReceiptType = "consequenceos.receipt.v0"          // v0: the payload's "type"
+	MediaType   = "vnd.consequenceos.receipt.v0+json" // v0: each protected header's "typ"
+
+	ReceiptTypeV1 = "consequenceos.receipt.v1"          // v1: the payload's "type"
+	MediaTypeV1   = "vnd.consequenceos.receipt.v1+json" // v1: each protected header's "typ"
+
+	AlgEd25519 = "Ed25519"   // RFC 9864 name
+	AlgMLDSA87 = "ML-DSA-87" // FIPS 204, post-quantum
 
 	// HeaderName carries the receipt on the HTTP request to the receiver.
 	HeaderName = "X-Consequence-Receipt"
@@ -47,13 +57,14 @@ var (
 	ErrParamsMismatch = errors.New("receipt does not match these arguments")
 	ErrAlreadyUsed    = errors.New("receipt has already been used")
 	ErrMissing        = errors.New("no receipt was provided")
+	ErrWrongAudience  = errors.New("receipt is for a different receiver")
 )
 
 var reasons = map[error]string{
 	ErrMalformed: "malformed", ErrUnknownKey: "unknown_key", ErrBadSignature: "bad_signature",
 	ErrNotCanonical: "not_canonical", ErrExpired: "expired", ErrNotYetValid: "not_yet_valid",
 	ErrToolMismatch: "tool_mismatch", ErrParamsMismatch: "params_mismatch",
-	ErrAlreadyUsed: "already_used", ErrMissing: "missing",
+	ErrAlreadyUsed: "already_used", ErrMissing: "missing", ErrWrongAudience: "wrong_audience",
 }
 
 // Reason returns the stable code for a receipt error, e.g. "expired".
@@ -84,6 +95,7 @@ type Receipt struct {
 	Type       string    `json:"type"`
 	ReceiptID  string    `json:"receipt_id"`
 	Issuer     string    `json:"issuer"`
+	Audience   string    `json:"audience,omitempty"` // v1: the receiver ID it's for; empty in v0
 	AgentID    string    `json:"agent_id"`
 	OwnerID    string    `json:"owner_id"`
 	ApprovedBy string    `json:"approved_by"` // empty for policy_allowed
@@ -93,6 +105,49 @@ type Receipt struct {
 	Policy     string    `json:"policy"` // the rule that decided
 	IssuedAt   Timestamp `json:"issued_at"`
 	ExpiresAt  Timestamp `json:"expires_at"`
+
+	Consequence *Consequence `json:"consequence,omitempty"` // v1: how serious the action is; nil in v0
+}
+
+// Consequence says how serious the action a v1 receipt covers is, as
+// ConsequenceOS judged it when it decided. Only strings and a non-negative
+// integer, to fit the draft's content rules.
+type Consequence struct {
+	Score         int    `json:"score"`              // 0 (harmless) to 100 (worst)
+	Reversibility string `json:"reversibility"`      // one of the Reversibility constants
+	Source        string `json:"source"`             // SourceConfig or SourceMap
+	MapHash       string `json:"map_hash,omitempty"` // which consequence map judged it, when Source is SourceMap
+}
+
+// Values for Consequence.Reversibility and Consequence.Source.
+const (
+	ReversibilityRead        = "read"        // changes nothing
+	ReversibilityReversible  = "reversible"  // can be undone directly
+	ReversibilityCompensable = "compensable" // a named call can undo its effect
+	ReversibilityNone        = "none"        // can't be undone
+
+	SourceConfig = "config" // from the tools listed in consequence.yaml
+	SourceMap    = "map"    // from a consequence map of the system
+)
+
+// MaxScore is the highest consequence score.
+const MaxScore = 100
+
+// validate checks the fields a verifier may rely on.
+func (c *Consequence) validate() error {
+	switch {
+	case c.Score < 0 || c.Score > MaxScore:
+		return fmt.Errorf("consequence score %d is outside 0 to %d", c.Score, MaxScore)
+	case !slices.Contains([]string{ReversibilityRead, ReversibilityReversible, ReversibilityCompensable, ReversibilityNone}, c.Reversibility):
+		return fmt.Errorf("unknown consequence reversibility %q", c.Reversibility)
+	case c.Source != SourceConfig && c.Source != SourceMap:
+		return fmt.Errorf("unknown consequence source %q", c.Source)
+	case c.Source == SourceMap && !strings.HasPrefix(c.MapHash, "sha256:"):
+		return errors.New("a consequence from a map needs its map_hash")
+	case c.Source == SourceConfig && c.MapHash != "":
+		return errors.New("a consequence from config has no map_hash")
+	}
+	return nil
 }
 
 // Action is the exact call the receipt covers.
@@ -154,10 +209,11 @@ func SigningInput(protected, payload string) []byte {
 }
 
 // VerifyOffline checks a receipt's encoding and both signatures against
-// keys, and that it is currently valid. It does not check single use; only
-// the issuer can, through POST /v1/receipts/verify (see Client).
+// keys, and that it is currently valid. It accepts v0 and v1 receipts. It
+// checks neither the audience (see CheckAudience) nor single use; only the
+// issuer can check single use, through POST /v1/receipts/verify (see Client).
 func VerifyOffline(encoded []byte, keys *KeySet, now time.Time) (*Receipt, error) {
-	payload, err := verifiedPayload(encoded, keys, MediaType)
+	payload, typ, err := verifiedPayload(encoded, keys, MediaType, MediaTypeV1)
 	if err != nil {
 		return nil, err
 	}
@@ -165,8 +221,11 @@ func VerifyOffline(encoded []byte, keys *KeySet, now time.Time) (*Receipt, error
 	if err := decodeStrict(payload, &r); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
-	if r.Type != ReceiptType || r.ReceiptID == "" || r.Action.Tool == "" || r.Action.ParamsHash == "" {
-		return nil, fmt.Errorf("%w: missing or wrong type, receipt_id or action", ErrMalformed)
+	if r.ReceiptID == "" || r.Action.Tool == "" || r.Action.ParamsHash == "" {
+		return nil, fmt.Errorf("%w: missing receipt_id or action", ErrMalformed)
+	}
+	if err := checkVersion(&r, typ); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
 
 	switch {
@@ -178,27 +237,75 @@ func VerifyOffline(encoded []byte, keys *KeySet, now time.Time) (*Receipt, error
 	return &r, nil
 }
 
+// checkVersion makes sure the payload's type matches the protected
+// headers' typ, and that each version carries exactly its own fields: a v0
+// receipt never names an audience, and a v1 receipt always does.
+func checkVersion(r *Receipt, typ string) error {
+	switch {
+	case typ == MediaType && r.Type == ReceiptType:
+		if r.Audience != "" || r.Consequence != nil {
+			return errors.New("a v0 receipt has no audience or consequence")
+		}
+	case typ == MediaTypeV1 && r.Type == ReceiptTypeV1:
+		if r.Audience == "" || r.Consequence == nil {
+			return errors.New("a v1 receipt needs an audience and a consequence")
+		}
+		return r.Consequence.validate()
+	default:
+		return fmt.Errorf("payload type %q doesn't match header typ %q", r.Type, typ)
+	}
+	return nil
+}
+
+// CheckAudience confirms a valid receipt is for this receiver: audience is
+// the receiver's ID, as listed under receivers in the server's config. A v1
+// receipt names exactly one receiver; a v0 receipt names none and passes,
+// until v0 support is removed.
+func CheckAudience(r *Receipt, audience string) error {
+	if r.Type == ReceiptType {
+		return nil
+	}
+	if audience == "" {
+		return fmt.Errorf("%w: this receiver has no audience set, so it can't accept v1 receipts", ErrWrongAudience)
+	}
+	if r.Audience != audience {
+		return fmt.Errorf("%w: it is for %q", ErrWrongAudience, r.Audience)
+	}
+	return nil
+}
+
 // verifiedPayload checks a signed object's encoding and both signatures,
-// requiring the protected headers to say typ, and returns the canonical
-// payload. The typ check keeps a signed audit head from passing as a
-// receipt, and the other way round.
-func verifiedPayload(encoded []byte, keys *KeySet, typ string) ([]byte, error) {
+// requiring the protected headers to say one of typs (all the same one),
+// and returns the canonical payload and that typ. The typ check keeps a
+// signed audit head from passing as a receipt, and the other way round.
+func verifiedPayload(encoded []byte, keys *KeySet, typs ...string) ([]byte, string, error) {
 	var signed Signed
 	if err := decodeStrict(encoded, &signed); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
+		return nil, "", fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
-	if err := verifySignatures(signed, keys, typ); err != nil {
-		return nil, err
+	if len(signed.Signatures) == 0 {
+		return nil, "", fmt.Errorf("%w: no signatures", ErrMalformed)
+	}
+	first, err := decodeHeader(signed.Signatures[0].Protected)
+	if err != nil {
+		return nil, "", err
+	}
+	if !slices.Contains(typs, first.Typ) {
+		return nil, "", fmt.Errorf("%w: unexpected typ %q", ErrMalformed, first.Typ)
+	}
+	typ := first.Typ
+	if err := verifySignatures(signed, keys, typ); err != nil { // every signature must say the same typ
+		return nil, "", err
 	}
 	payload, err := b64.DecodeString(signed.Payload)
 	if err != nil {
-		return nil, fmt.Errorf("%w: payload is not base64url", ErrMalformed)
+		return nil, "", fmt.Errorf("%w: payload is not base64url", ErrMalformed)
 	}
 	// The signed bytes must already be canonical; we check, never rewrite.
 	if canonical, err := Canonicalize(payload); err != nil || !bytes.Equal(canonical, payload) {
-		return nil, ErrNotCanonical
+		return nil, "", ErrNotCanonical
 	}
-	return payload, nil
+	return payload, typ, nil
 }
 
 // verifySignatures requires exactly one Ed25519 signature followed by one

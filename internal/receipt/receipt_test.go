@@ -80,7 +80,7 @@ func (h harness) issue(t *testing.T, approvedBy string) []byte {
 
 func TestIssuedReceiptContents(t *testing.T) {
 	h := newHarness(t)
-	r, err := h.checker.Verify(context.Background(), h.issue(t, "ada@acme.example"), "purchase_order.confirm", []byte(args))
+	r, err := h.checker.Verify(context.Background(), "payments-api", h.issue(t, "ada@acme.example"), "purchase_order.confirm", []byte(args))
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestIssuedReceiptContents(t *testing.T) {
 		}
 	}
 
-	policyOnly, err := h.checker.Verify(context.Background(), h.issue(t, ""), "purchase_order.confirm", []byte(args))
+	policyOnly, err := h.checker.Verify(context.Background(), "payments-api", h.issue(t, ""), "purchase_order.confirm", []byte(args))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestVerifyRejects(t *testing.T) {
 			if tt.args != "" {
 				a = tt.args
 			}
-			_, err := h.checker.Verify(context.Background(), receipt, tool, []byte(a))
+			_, err := h.checker.Verify(context.Background(), "payments-api", receipt, tool, []byte(a))
 			if !errors.Is(err, tt.want) {
 				t.Errorf("err = %v, want %v", err, tt.want)
 			}
@@ -249,10 +249,10 @@ func TestVerifyRejects(t *testing.T) {
 func TestSingleUse(t *testing.T) {
 	h := newHarness(t)
 	receipt := h.issue(t, "")
-	if _, err := h.checker.Verify(context.Background(), receipt, "purchase_order.confirm", []byte(args)); err != nil {
+	if _, err := h.checker.Verify(context.Background(), "payments-api", receipt, "purchase_order.confirm", []byte(args)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.checker.Verify(context.Background(), receipt, "purchase_order.confirm", []byte(args)); !errors.Is(err, verify.ErrAlreadyUsed) {
+	if _, err := h.checker.Verify(context.Background(), "payments-api", receipt, "purchase_order.confirm", []byte(args)); !errors.Is(err, verify.ErrAlreadyUsed) {
 		t.Errorf("replay: err = %v, want ErrAlreadyUsed", err)
 	}
 }
@@ -260,8 +260,8 @@ func TestSingleUse(t *testing.T) {
 func TestFailedCheckDoesNotBurnReceipt(t *testing.T) {
 	h := newHarness(t)
 	receipt := h.issue(t, "")
-	_, _ = h.checker.Verify(context.Background(), receipt, "purchase_order.confirm", []byte(`{"amount":1}`))
-	if _, err := h.checker.Verify(context.Background(), receipt, "purchase_order.confirm", []byte(args)); err != nil {
+	_, _ = h.checker.Verify(context.Background(), "payments-api", receipt, "purchase_order.confirm", []byte(`{"amount":1}`))
+	if _, err := h.checker.Verify(context.Background(), "payments-api", receipt, "purchase_order.confirm", []byte(args)); err != nil {
 		t.Errorf("a mismatched attempt used up the receipt: %v", err)
 	}
 }

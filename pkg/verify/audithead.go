@@ -28,7 +28,7 @@ type AuditHead struct {
 // VerifyAuditHead checks a signed head's encoding and both signatures.
 // Heads don't expire: a saved head stays evidence of the log at that time.
 func VerifyAuditHead(encoded []byte, keys *KeySet) (*AuditHead, error) {
-	payload, err := verifiedPayload(encoded, keys, AuditHeadMediaType)
+	payload, _, err := verifiedPayload(encoded, keys, AuditHeadMediaType)
 	if err != nil {
 		return nil, err
 	}

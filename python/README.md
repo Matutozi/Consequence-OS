@@ -39,7 +39,7 @@ For each `POST` under `paths` that is an MCP `tools/call`:
 
 1. It reads the receipt from the `X-Consequence-Receipt` header, or from `params._meta.consequenceReceipt` if the header is absent.
 2. It calls `POST /v1/receipts/verify` once. That call checks both signatures, the expiry, the tool, the exact arguments, and that the receipt hasn't been used before. It also uses the receipt up, so the check runs right before the action.
-3. It lets the request through only if the receipt is valid. Otherwise it answers HTTP 403 with JSON-RPC error `-31001` and a reason code (`missing`, `params_mismatch`, `already_used`, `expired`, and so on).
+3. It lets the request through only if the receipt is valid. Otherwise it answers HTTP 403 with JSON-RPC error `-31001` and a reason code (`missing`, `params_mismatch`, `already_used`, `expired`, `wrong_audience`, and so on). `wrong_audience` means a v1 receipt made out to another receiver: the server knows which receiver is asking from its API key.
 
 It also refuses, with reason `malformed`, any body that two JSON parsers could read differently:
 

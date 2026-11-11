@@ -43,7 +43,8 @@ type Verifier interface {
 }
 
 // Client verifies receipts with one call to the ConsequenceOS server. This
-// is the full check: signatures, expiry, tool, arguments and single use.
+// is the full check: signatures, expiry, audience, tool, arguments and
+// single use. The server knows the audience from this receiver's API key.
 type Client struct {
 	BaseURL string       // e.g. "http://localhost:8080"
 	APIKey  string       // this receiver's key, listed under receivers in the server's config
@@ -94,12 +95,16 @@ func (c *Client) Verify(ctx context.Context, receipt []byte, tool string, argume
 	return out.Receipt, nil
 }
 
-// Offline verifies signatures, expiry, tool and arguments with a local key
-// set, without contacting the server. It cannot enforce single use; pair it
-// with your own record of used receipt IDs if you rely on it alone.
+// Offline verifies signatures, expiry, audience, tool and arguments with a
+// local key set, without contacting the server. It cannot enforce single
+// use; pair it with your own record of used receipt IDs if you rely on it alone.
 type Offline struct {
 	Keys *KeySet
-	Now  func() time.Time // nil means time.Now
+	// Audience is this receiver's ID, as listed under receivers in the
+	// server's config. v1 receipts for any other receiver are refused, and
+	// without it every v1 receipt is.
+	Audience string
+	Now      func() time.Time // nil means time.Now
 }
 
 // Verify implements Verifier.
@@ -110,6 +115,9 @@ func (o *Offline) Verify(_ context.Context, receipt []byte, tool string, argumen
 	}
 	r, err := VerifyOffline(trimQuotes(receipt), o.Keys, now())
 	if err != nil {
+		return nil, err
+	}
+	if err := CheckAudience(r, o.Audience); err != nil {
 		return nil, err
 	}
 	if err := CheckAction(r, tool, arguments); err != nil {
