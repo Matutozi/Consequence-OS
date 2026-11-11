@@ -20,6 +20,12 @@ const (
 	// OpIn and OpNotIn compare against a list, e.g. value: [USD, EUR].
 	OpIn    Op = "in"
 	OpNotIn Op = "not_in"
+	// OpLike and OpNotLike match text against a glob, or a list of globs,
+	// e.g. value: "git status*" or value: ["*/.env", "*/.env.*"]. The globs
+	// follow the rules for tool patterns: * matches any run of characters
+	// and ? any one, "/" included.
+	OpLike    Op = "like"
+	OpNotLike Op = "not_like"
 )
 
 // Condition compares one top-level tool argument against a fixed value,
@@ -53,13 +59,51 @@ func (c Condition) validate() error {
 		if err := validateList(c.Value); err != nil {
 			return fmt.Errorf("condition on %q: op %q %w", c.Arg, c.Op, err)
 		}
+	case OpLike, OpNotLike:
+		if err := validatePatterns(c.Value); err != nil {
+			return fmt.Errorf("condition on %q: op %q %w", c.Arg, c.Op, err)
+		}
 	default:
-		return fmt.Errorf("condition on %q: unknown op %q (want eq, ne, gt, gte, lt, lte, in, not_in)", c.Arg, c.Op)
+		return fmt.Errorf("condition on %q: unknown op %q (want eq, ne, gt, gte, lt, lte, in, not_in, like, not_like)", c.Arg, c.Op)
 	}
 	if c.Fold && !c.comparesText() {
-		return fmt.Errorf("condition on %q: fold works only with eq, ne, in or not_in and a text value", c.Arg)
+		return fmt.Errorf("condition on %q: fold works only with eq, ne, in, not_in, like or not_like and a text value", c.Arg)
 	}
 	return nil
+}
+
+// validatePatterns checks that v is a glob, or a non-empty list of globs.
+func validatePatterns(v any) error {
+	items, isList := v.([]any)
+	if !isList {
+		items = []any{v}
+	}
+	if len(items) == 0 {
+		return fmt.Errorf("needs a glob or a list of globs")
+	}
+	for _, item := range items {
+		p, ok := item.(string)
+		if !ok || p == "" {
+			return fmt.Errorf("needs a glob or a list of globs, like \"git status*\"")
+		}
+		if !validPattern(p) {
+			return fmt.Errorf("pattern %q is not a valid glob", p)
+		}
+	}
+	return nil
+}
+
+// patterns returns a like or not_like condition's globs.
+func (c Condition) patterns() []string {
+	if p, ok := c.Value.(string); ok {
+		return []string{p}
+	}
+	items, _ := c.Value.([]any)
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.(string)) // validatePatterns checked each is text
+	}
+	return out
 }
 
 // comparesText reports whether the condition compares against text: eq or
@@ -76,6 +120,8 @@ func (c Condition) comparesText() bool {
 		}
 		_, ok = items[0].(string) // validateList keeps every item the same kind
 		return ok
+	case OpLike, OpNotLike:
+		return true // validatePatterns accepts only text
 	}
 	return false
 }
@@ -148,6 +194,13 @@ func (c Condition) matchValue(got any) bool {
 		// Like ne: an argument of the wrong kind is not "not in" the list.
 		items := c.Value.([]any)
 		return sameKind(got, items[0]) && !inList(got, items, c.Fold)
+	case OpLike:
+		s, ok := globText(got)
+		return ok && c.like(s)
+	case OpNotLike:
+		// Like ne: an argument that isn't text is not "not like" anything.
+		s, ok := globText(got)
+		return ok && !c.like(s)
 	}
 
 	a, okA := toNumber(got)
@@ -194,6 +247,34 @@ func validPattern(pattern string) bool {
 // slashless replaces "/" with NUL. It doesn't copy a string with no slashes.
 func slashless(s string) string {
 	return strings.ReplaceAll(s, "/", "\x00")
+}
+
+// like reports whether s matches any of the condition's globs. With fold,
+// outer spaces are ignored and letter case doesn't matter.
+func (c Condition) like(s string) bool {
+	if c.Fold {
+		s = strings.ToLower(strings.TrimSpace(s))
+	}
+	for _, p := range c.patterns() {
+		if c.Fold {
+			p = strings.ToLower(strings.TrimSpace(p))
+		}
+		if matchTool(p, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// globText returns v as text a glob can be matched against. Text holding
+// a NUL character doesn't count: matching swaps "/" for NUL (see
+// matchTool), so a NUL in the value could stand in for a "/" in the glob.
+func globText(v any) (string, bool) {
+	s, ok := v.(string)
+	if !ok || strings.ContainsRune(s, 0) {
+		return "", false
+	}
+	return s, true
 }
 
 func inList(v any, items []any, fold bool) bool {
