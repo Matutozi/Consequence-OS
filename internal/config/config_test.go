@@ -337,3 +337,42 @@ func TestUpstreamReceiver(t *testing.T) {
 		})
 	}
 }
+
+func TestStateDir(t *testing.T) {
+	tests := []struct {
+		name, dir, home, want, wantErr string
+	}{
+		{"absolute", "/var/lib/consequence", "", "/var/lib/consequence", ""},
+		{"cleaned", "/var/lib/consequence/../c/", "", "/var/lib/c", ""},
+		{"home", "~/.consequence", "/home/ada", "/home/ada/.consequence", ""},
+		{"relative", ".consequence", "", "", `state_dir ".consequence" must be an absolute path or start with ~/`},
+		{"another user's home", "~bo/.consequence", "/home/ada", "", "must be an absolute path"},
+		{"no home", "~/.consequence", "", "", "$HOME is not set"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := map[string]string{"KEY_SUPPORT": "k"}
+			if tt.home != "" {
+				env["HOME"] = tt.home
+			}
+			cfg, err := Parse([]byte(validYAML+"state_dir: "+tt.dir+"\n"), baseEnv(env))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.StateDir != tt.want {
+				t.Errorf("state_dir = %q, want %q", cfg.StateDir, tt.want)
+			}
+		})
+	}
+
+	_, err := Parse([]byte(validYAML+"state_dir: /x\ndatabase_url_env: DB\n"), baseEnv(map[string]string{"KEY_SUPPORT": "k", "DB": "postgres://x"}))
+	if err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Errorf("both stores: err = %v", err)
+	}
+}

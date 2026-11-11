@@ -182,3 +182,30 @@ func TestParallelCallsCannotSlipUnderAGlobLimit(t *testing.T) {
 		t.Errorf("%d calls forwarded, want exactly 3", n)
 	}
 }
+
+func TestLimitsSurviveARestart(t *testing.T) {
+	dir := t.TempDir()
+	rules := []policy.Rule{
+		{Name: "daily-total", Tool: "payments.refund", Limit: &policy.Limit{Sum: "amount", Max: 100, Per: 24 * time.Hour}, Action: policy.ActionDeny},
+		{Name: "refunds", Tool: "payments.refund", Action: policy.ActionAllow},
+	}
+	st, err := store.OpenFile(dir, store.FileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixtureWithRules(t, st, rules)
+	if got := f.outcome(t, refund("90")); got != "forwarded" {
+		t.Fatalf("before the restart: %s", got)
+	}
+	st.Close()
+
+	st, err = store.OpenFile(dir, store.FileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	f = newFixtureWithRules(t, st, rules)
+	if got := f.outcome(t, refund("20")); got != "blocked" {
+		t.Errorf("after the restart: %s, want blocked: the 90 already refunded still counts", got)
+	}
+}

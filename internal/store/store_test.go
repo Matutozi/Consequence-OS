@@ -23,12 +23,13 @@ import (
 )
 
 // The same tests run against every Store implementation, so the in-memory
-// store and Postgres can't drift apart. Postgres runs only when
+// store, the file store and Postgres can't drift apart. Postgres runs only when
 // CONSEQUENCE_TEST_DATABASE_URL points at a server where we may create
 // databases, e.g. postgres://postgres:test@127.0.0.1:55432/postgres.
 func stores(t *testing.T) map[string]func(t *testing.T) Store {
 	return map[string]func(t *testing.T) Store{
 		"memory":   func(*testing.T) Store { return NewMemory() },
+		"file":     newTestFile,
 		"postgres": newTestPostgres,
 	}
 }
@@ -543,6 +544,11 @@ func TestConcurrentAppendsKeepOneChain(t *testing.T) {
 func tamper(t *testing.T, st Store, how string, id string) {
 	t.Helper()
 	switch s := st.(type) {
+	case *File:
+		// Its memory, like the in-memory store's. file_test.go edits the
+		// journal itself and reopens it.
+		tamper(t, s.mem, how, id)
+		return
 	case *Memory:
 		s.mu.Lock()
 		defer s.mu.Unlock()

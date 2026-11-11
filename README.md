@@ -81,7 +81,10 @@ Agents now connect to `http://<this host>:8080/mcp`. Some things to know:
 - **Listen address:** the image listens on `0.0.0.0:8080` whatever the config's `listen` says. Change it with `-e CONSEQUENCE_LISTEN=…` or the `-listen` flag.
 - **Upstream address:** inside the container, `127.0.0.1` is the container itself. Point `upstream` at an address the container can reach, such as the tool server's host name.
 - **Approval links:** set `public_url` to the address approvers will open, for example `https://consequence.acme.example`. Otherwise links point at `localhost`.
-- **Storage:** without `database_url_env`, everything is kept in memory and lost on restart. [deploy/consequence.docker.yaml](deploy/consequence.docker.yaml) shows a config with Postgres and email.
+- **Storage:** there are three choices:
+  - **Postgres** (`database_url_env`) is for teams, and for several servers sharing one log. [deploy/consequence.docker.yaml](deploy/consequence.docker.yaml) shows a config with Postgres and email.
+  - **Files** (`state_dir: ~/.consequence`) are for one machine, with no database. See [Keeping state in files](#keeping-state-in-files).
+  - **Memory** is used when neither is set. Everything is lost on restart, including the list of used receipts. A receipt taken just before a restart could then be used again until it expires (5 minutes by default), by a receiver that checks receipts through ConsequenceOS. Use files or Postgres wherever a receiver does.
 
 ## Quickstart: a held $5,000 refund in under 10 minutes
 
@@ -299,10 +302,6 @@ consequenced -verify-audit -audit-head head-2026-11-04.json
 
 A head is signed with the same two keys as receipts, under its own type, so it can't pass as a receipt. Anyone with the public keys can check one, using `verify.VerifyAuditHead` in Go. `-verify-audit` exits with status 1 if anything was changed, so you can run it from cron or CI and alert on failure.
 
-What it doesn't cover:
-- **Entries from before the chain.** Those written before upgrading to a version with the chain have no hashes. Verification counts them as `unhashed` but can't check them.
-- **Rewrites after the last saved head.** The chain's hashes need no key, so someone with database access could rebuild everything after your newest saved head. Everything before it is safe while the head is kept somewhere they can't reach. Save heads often. Forging a head itself needs the signing keys.
-
 ## Receipts
 
 A receipt is a JWS in **General JSON Serialization** over an **RFC 8785 canonical** payload. It carries two signatures, **Ed25519** and post-quantum **ML-DSA-87**, and both must verify. This follows how the [IETF Agent Permission Receipts draft](https://datatracker.ietf.org/doc/draft-izmaylov-agent-permission-receipts/) encodes its records. The draft defines no server-issued receipt, so the payload fields are ConsequenceOS's own:
@@ -426,12 +425,34 @@ One YAML file names everything, and secrets live in environment variables that t
 | `upstream_receiver` | The ID of the receiver behind `upstream`. Receipts name it (v1), so no other receiver accepts them. When `receivers` are listed it must be one of them. Unset, receipts are v0 |
 | `owners` | `id` and `approvers` (email addresses) for each owner |
 | `receipts` | `ttl` (default `5m`), `ed25519_key_env`, `mldsa87_key_env` |
-| `database_url_env` | Env var holding a Postgres URL. Without it, everything is kept in memory |
+| `database_url_env` | Env var holding a Postgres URL |
+| `state_dir` | A directory for the file store, e.g. `~/.consequence`: absolute, or starting with `~/`. Set this or `database_url_env`, not both. With neither, everything is kept in memory |
 | `email` | `smtp_url_env` (e.g. `smtp://user:pass@smtp.example.com:587`, or `smtps://…:465`) and `from`. Without it, approver links go to the server log |
 | `allowed_origins` | Browser origins allowed to call `/mcp`. None by default |
 | `tools`, `rules` | The policy (see above) |
 
 Generate signing keys with `go run ./cmd/consequenced -genkeys`, or run `make env`, which writes all secrets to `.env`. Validate a config with `make check`.
+
+### Keeping state in files
+
+With `state_dir` set, ConsequenceOS keeps the audit log, approvals, limits and used receipts on disk, with no database:
+
+```yaml
+state_dir: ~/.consequence
+```
+
+- **A journal.** Every change is one JSON line in `state_dir/journal.jsonl`, synced to disk before the change counts as done. The journal is replayed on start. It holds what Postgres would: argument hashes and summaries, the hashes of approval link tokens, and the arguments shown to approvers.
+- **Crashes.** A crash part-way through a write leaves a torn last line. It is dropped with a warning on the next start, since that change was never reported done. A damaged line anywhere else stops the start, naming the line, rather than guessing.
+- **Size.** Once the journal has doubled since it was last rewritten, and is at least 1 MiB, it is rewritten from the current state. Every audit entry is kept unchanged. Pruned usage, expired receipts and the steps of each approval are rewritten as one line each.
+- **Tampering.** Audit entries are restored exactly as written, so `consequenced -verify-audit` still finds an edited journal. It opens the directory read-only, so it works while the server runs.
+- **One process at a time.** The server locks `state_dir` while it runs, and a second one fails after waiting 2 seconds. The operating system frees the lock if the process dies, so a crash never leaves it stuck. The directory is created with mode `0700`, and the journal with `0600`. It works on Linux and macOS.
+- **If a write fails,** for example because the disk is full, the store refuses every request until a restart. Calls are not forwarded, and nothing acts on a change the journal lacks.
+
+Every write waits for the disk, so this suits one person or a small team. Use Postgres for heavy traffic, or for several servers.
+
+What it doesn't cover:
+- **Entries from before the chain.** Those written before upgrading to a version with the chain have no hashes. Verification counts them as `unhashed` but can't check them.
+- **Rewrites after the last saved head.** The chain's hashes need no key, so someone with database access could rebuild everything after your newest saved head. Everything before it is safe while the head is kept somewhere they can't reach. Save heads often. Forging a head itself needs the signing keys.
 
 ## Running without Docker
 
@@ -507,7 +528,8 @@ This is an early MVP. Built:
 - a hash-chained audit log, with signed heads and a verify command;
 - policy checks on resource reads and prompts, a cap on pending approvals, and approval decisions that are always audited;
 - consequence scores, with rules that match on them and the score in the audit log and on the approval page;
-- receipt v1, which names its receiver and carries the call's consequence.
+- receipt v1, which names its receiver and carries the call's consequence;
+- a file store, which keeps state on one machine across restarts with no database.
 
 Not yet:
 - passkey-signed approvals.
