@@ -14,6 +14,7 @@ import (
 
 const testConfig = `
 upstream: http://127.0.0.1:9090/mcp
+upstream_receiver: payments-api
 admin_token_env: TEST_CONSEQUENCED_ADMIN
 receipts: { ed25519_key_env: TEST_CONSEQUENCED_ED, mldsa87_key_env: TEST_CONSEQUENCED_ML }
 owners: [{ id: acme, approvers: [ada@acme.example] }]
@@ -37,6 +38,22 @@ rules:
       - { arg: supplier, op: in, value: [Coleman Cables, Acme Steel] }
     action: allow
 `
+
+func TestCheckWarnsWithoutUpstreamReceiver(t *testing.T) {
+	writeTestConfig(t, "") // sets the env vars
+	path := filepath.Join(t.TempDir(), "consequence.yaml")
+	cfg := strings.Replace(testConfig, "upstream_receiver: payments-api\n", "", 1)
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-config", path, "-check"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "upstream_receiver is not set, so receipts are v0") {
+		t.Errorf("no warning about upstream_receiver:\n%s", out.String())
+	}
+}
 
 func TestCheckPrintsWarnings(t *testing.T) {
 	path := writeTestConfig(t, `

@@ -308,7 +308,7 @@ A receipt is a JWS in **General JSON Serialization** over an **RFC 8785 canonica
 
 ```json
 {
-  "type": "consequenceos.receipt.v0",
+  "type": "consequenceos.receipt.v1",
   "receipt_id": "rcpt_59a2ef3c1979b9a1c7e6c0944606fbc6",
   "issuer": "http://localhost:8080",
   "agent_id": "support-bot",
@@ -322,11 +322,15 @@ A receipt is a JWS in **General JSON Serialization** over an **RFC 8785 canonica
   },
   "level": "irreversible",
   "policy": "big-refunds",
+  "audience": "payments-api",
+  "consequence": { "score": 80, "reversibility": "none", "source": "config" },
   "issued_at": "2026-11-02T10:14:00Z",
   "expires_at": "2026-11-02T10:19:00Z"
 }
 ```
 
+- **`audience`:** the receiver the call was sent to, set by `upstream_receiver`. Any other receiver refuses the receipt with `wrong_audience`, so a receipt for production payments can't be spent on staging, and another receiver can't use it up.
+- **`consequence`:** how serious ConsequenceOS judged the action (see [Consequence](#consequence)). `score` runs from 0 to 100. `reversibility` is `read`, `reversible`, `compensable` or `none`. `source` is `config` or `map`, and a `map` consequence also carries the `map_hash` of the map that judged it.
 - **`params_hash`:** SHA-256 of the canonical JSON of the tool's arguments. If anything changes $4,800 to $48,000 on the way, the hashes differ and the receiver refuses.
 - **`decision`:** `policy_allowed` when a rule allowed the call, `human_approved` when a named approver did. A receiver can demand the second kind.
 - **Single use:** a receipt works once, and the verify endpoint records each use.
@@ -334,21 +338,11 @@ A receipt is a JWS in **General JSON Serialization** over an **RFC 8785 canonica
 
 ### Receipt versions
 
-The server issues **v0** receipts, shown above. Receivers built from this release also accept **v1**, which adds two fields:
+The server issues **v1** receipts, shown above, when `upstream_receiver` is set. The shipped configs set it. Without it, the server issues **v0**: the same receipt without `audience` and `consequence`, which any receiver with the same tool accepts. `-check` and the server's startup log warn about that.
 
-```json
-{
-  "type": "consequenceos.receipt.v1",
-  "audience": "payments-api",
-  "consequence": { "score": 80, "reversibility": "none", "source": "config" },
-  "...": "every v0 field, unchanged"
-}
-```
-
-- **`audience`:** the receiver the call was sent to, by its ID under `receivers`. Any other receiver refuses the receipt with `wrong_audience`, so a receipt for production payments can't be spent on staging, and another receiver can't use it up.
-- **`consequence`:** how serious ConsequenceOS judged the action. `score` runs from 0 to 100. `reversibility` is `read`, `reversible`, `compensable` or `none`. `source` is `config` or `map`, and a `map` consequence also carries the `map_hash` of the map that judged it.
-
-Receivers parse receipts strictly, so a receiver from an older release refuses v1. That's why the switch takes two releases: this one teaches receivers v1, and the next one starts issuing it. Update your receivers first. If you verify offline, set `Audience` to your receiver ID now, or v1 receipts will be refused. Receivers will keep accepting v0 for at least two releases after the server stops issuing it.
+- **Upgrade receivers first.** Receivers from v0.3.0 on accept both versions. Older ones parse receipts strictly and refuse v1, so update them before you set `upstream_receiver`.
+- **Offline receivers need their ID.** If you verify offline, set `Audience` to the same ID as `upstream_receiver`, or v1 receipts are refused.
+- **v0 is on its way out.** Receivers keep accepting v0 until at least v0.6.0. A later release will make `upstream_receiver` required.
 
 ### Protecting a receiver in Go
 
@@ -428,6 +422,7 @@ One YAML file names everything, and secrets live in environment variables that t
 | `admin_token_env` | Env var holding the token for `/v1/audit` |
 | `agents` | `id`, `owner_id` and `api_key_env` for each agent |
 | `receivers` | `id` and `api_key_env` for each receiver allowed to call the verify endpoint |
+| `upstream_receiver` | The ID of the receiver behind `upstream`. Receipts name it (v1), so no other receiver accepts them. When `receivers` are listed it must be one of them. Unset, receipts are v0 |
 | `owners` | `id` and `approvers` (email addresses) for each owner |
 | `receipts` | `ttl` (default `5m`), `ed25519_key_env`, `mldsa87_key_env` |
 | `database_url_env` | Env var holding a Postgres URL. Without it, everything is kept in memory |
@@ -508,7 +503,8 @@ This is an early MVP. Built:
 - the FastAPI/Starlette receiver middleware;
 - a hash-chained audit log, with signed heads and a verify command;
 - policy checks on resource reads and prompts, a cap on pending approvals, and approval decisions that are always audited;
-- consequence scores, with rules that match on them and the score in the audit log and on the approval page.
+- consequence scores, with rules that match on them and the score in the audit log and on the approval page;
+- receipt v1, which names its receiver and carries the call's consequence.
 
 Not yet:
 - passkey-signed approvals.

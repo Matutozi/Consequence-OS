@@ -149,6 +149,7 @@ func newFixtureWithRules(t testing.TB, st store.Store, rules []policy.Rule) fixt
 		Store:          st,
 		Approvals:      svc,
 		Receipts:       receipt.NewIssuer(keys, "http://cos.test", 5*time.Minute, now),
+		Receiver:       "payments-api", // as the shipped configs set it, so receipts are v1
 		Log:            discard,
 		Now:            now,
 	})

@@ -41,6 +41,9 @@ agents:
 receivers:
   - id: payments-api
     api_key_env: CONSEQUENCE_KEY_RECEIVER_PAYMENTS
+# The receiver behind upstream. Receipts name it (receipt v1), so no other
+# receiver will accept them.
+upstream_receiver: payments-api
 
 # Consequence level per tool: read, reversible or irreversible.
 # Tools not listed here are treated as irreversible.

@@ -56,7 +56,7 @@ default_allow_below: 20
 
 - **Audit log:** each entry records the score. The hash chain covers it. Entries from before scores existed still verify, and show no score.
 - **Approvals:** the approval page shows the score and the reasons above the arguments.
-- **Receipts:** not yet. Receipt v1 has room for the score, and the server will fill it once it starts issuing v1.
+- **Receipts:** a v1 receipt carries the score, reversibility and source, so the receiver can see how serious the call was judged. The server issues v1 when `upstream_receiver` is set.
 
 ## What it doesn't cover
 

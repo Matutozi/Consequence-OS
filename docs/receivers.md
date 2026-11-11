@@ -74,4 +74,4 @@ A receipt proves that ConsequenceOS approved these exact arguments. It can't pro
 
 ## Offline checks
 
-The Go package can also check a receipt without contacting ConsequenceOS. Fetch the public keys once from `/.well-known/consequence-keys`, then use `&verify.Offline{Keys: keys, Audience: "payments-api"}`, with the ID your service is listed under in `receivers`. Without `Audience`, v1 receipts are refused. It checks signatures, expiry, the tool and the arguments, but it **can't enforce single use**, so keep your own record of used receipt IDs if you rely on it.
+The Go package can also check a receipt without contacting ConsequenceOS. Fetch the public keys once from `/.well-known/consequence-keys`, then use `&verify.Offline{Keys: keys, Audience: "payments-api"}`, with the ID that ConsequenceOS's `upstream_receiver` names your service by. Without `Audience`, v1 receipts are refused. It checks signatures, expiry, the tool and the arguments, but it **can't enforce single use**, so keep your own record of used receipt IDs if you rely on it.

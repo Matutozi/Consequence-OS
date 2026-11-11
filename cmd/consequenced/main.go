@@ -92,7 +92,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return explain(out, engine, *tool, *toolArgs, *at)
 	case *check:
 		printSummary(out, cfg)
-		printWarnings(out, engine)
+		printWarnings(out, cfg, engine)
 		return nil
 	}
 	return serve(ctx, cfg, engine)
@@ -115,8 +115,11 @@ func withListen(listen string) config.LookupEnv {
 // serve runs the HTTP server until ctx is cancelled.
 func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	for _, w := range cfg.Warnings() {
+		log.Warn("config: " + w) // the same warnings -check prints
+	}
 	for _, w := range engine.Warnings() {
-		log.Warn("policy: " + w) // the same warnings -check prints
+		log.Warn("policy: " + w)
 	}
 	st, err := openStore(ctx, cfg, log)
 	if err != nil {
@@ -156,6 +159,7 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 		Store:          st,
 		Approvals:      approvals,
 		Receipts:       receipt.NewIssuer(keys, cfg.PublicURL, cfg.Receipts.TTL, nil),
+		Receiver:       cfg.UpstreamReceiver,
 		Log:            log,
 	})
 	if err != nil {
@@ -406,8 +410,8 @@ func printSummary(out io.Writer, cfg *config.Config) {
 
 // printWarnings lists rules that are valid but may let through more than
 // intended. They don't make -check fail: the config is still usable.
-func printWarnings(out io.Writer, engine *policy.Engine) {
-	warnings := engine.Warnings()
+func printWarnings(out io.Writer, cfg *config.Config, engine *policy.Engine) {
+	warnings := append(cfg.Warnings(), engine.Warnings()...)
 	if len(warnings) == 0 {
 		return
 	}
