@@ -219,8 +219,8 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 // checkAuditChain verifies the stored audit log and prints the result. A
 // broken chain is an error, so scripts and cron jobs can alert on the exit code.
 func checkAuditChain(ctx context.Context, out io.Writer, cfg *config.Config, headFile string) error {
-	if cfg.DatabaseURL == "" {
-		return errors.New("-verify-audit needs database_url_env: the in-memory store keeps no log between runs")
+	if cfg.DatabaseURL == "" && cfg.StateDir == "" {
+		return errors.New("-verify-audit needs database_url_env or state_dir: the in-memory store keeps no log between runs")
 	}
 	var v audit.ChainVerifier
 	if headFile != "" {
@@ -231,7 +231,14 @@ func checkAuditChain(ctx context.Context, out io.Writer, cfg *config.Config, hea
 		v.ExpectHead(head.Seq, head.Hash)
 		fmt.Fprintf(out, "saved head: entry %d, signed %s\n", head.Seq, head.SignedAt.Format(time.RFC3339))
 	}
-	st, err := store.OpenPostgres(ctx, cfg.DatabaseURL)
+	var st store.Store
+	var err error
+	if cfg.StateDir != "" {
+		// Read-only, so the check works while a server has the directory open.
+		st, err = store.OpenFile(cfg.StateDir, store.FileOptions{ReadOnly: true})
+	} else {
+		st, err = store.OpenPostgres(ctx, cfg.DatabaseURL)
+	}
 	if err != nil {
 		return err
 	}
@@ -300,10 +307,19 @@ func newNotifier(cfg *config.Config, log *slog.Logger) (approval.Notifier, error
 	return n, nil
 }
 
-// openStore uses Postgres when a database URL is configured, otherwise memory.
+// openStore uses Postgres when a database URL is configured, the file
+// store when a state_dir is, and memory otherwise.
 func openStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (store.Store, error) {
+	if cfg.StateDir != "" {
+		st, err := store.OpenFile(cfg.StateDir, store.FileOptions{Log: log})
+		if err != nil {
+			return nil, err
+		}
+		log.Info("using the file store", "state_dir", cfg.StateDir)
+		return st, nil
+	}
 	if cfg.DatabaseURL == "" {
-		log.Warn("no database_url_env set: using the in-memory store, which loses everything on restart")
+		log.Warn("no database_url_env or state_dir set: using the in-memory store, which loses everything on restart")
 		return store.NewMemory(), nil
 	}
 	pg, err := store.OpenPostgres(ctx, cfg.DatabaseURL)
@@ -358,8 +374,11 @@ func explain(out io.Writer, engine *policy.Engine, tool, rawArgs, rawAt string) 
 
 func printSummary(out io.Writer, cfg *config.Config) {
 	storage := "in memory (lost on restart)"
-	if cfg.DatabaseURLEnv != "" {
+	switch {
+	case cfg.DatabaseURLEnv != "":
 		storage = "Postgres, URL from $" + cfg.DatabaseURLEnv
+	case cfg.StateDir != "":
+		storage = "files in " + cfg.StateDir
 	}
 	fmt.Fprintf(out, "config OK\n  listen:            %s\n  public URL:        %s\n  upstream:          %s\n"+
 		"  approval timeout:  %s\n  approval validity: %s\n  receipt validity:  %s\n  admin token from:  $%s\n  storage:           %s\n",

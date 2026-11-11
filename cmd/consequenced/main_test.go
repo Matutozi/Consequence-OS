@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matutozi/consequence-os/internal/audit"
 	"github.com/matutozi/consequence-os/internal/receipt"
+	"github.com/matutozi/consequence-os/internal/store"
 )
 
 const testConfig = `
@@ -126,7 +128,7 @@ func TestRun(t *testing.T) {
 		{"bad args", []string{"-config", path, "-tool", "notes.read", "-args", "[1]"}, "", "JSON object"},
 		{"missing config", []string{"-config", "/does/not/exist.yaml"}, "", "read config"},
 		{"-listen overrides the file", []string{"-config", path, "-listen", "0.0.0.0:9999", "-check"}, "listen:            0.0.0.0:9999\n  public URL:        http://localhost:9999", ""},
-		{"-verify-audit needs a database", []string{"-config", path, "-verify-audit"}, "", "needs database_url_env"},
+		{"-verify-audit needs a database", []string{"-config", path, "-verify-audit"}, "", "needs database_url_env or state_dir"},
 		{"-listen is checked", []string{"-config", path, "-listen", "nonsense", "-check"}, "", `listen "nonsense" must look like`},
 	}
 	for _, tt := range tests {
@@ -215,5 +217,36 @@ func TestListenFlagBeatsEnv(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "listen:            127.0.0.1:7001") {
 		t.Errorf("flag didn't beat the env var: %s", out.String())
+	}
+}
+
+func TestStateDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	path := writeTestConfig(t, "state_dir: "+dir+"\n")
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-config", path, "-check"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "storage:           files in "+dir) {
+		t.Errorf("summary doesn't name the state_dir:\n%s", out.String())
+	}
+
+	// A server has the directory open, and wrote two entries.
+	st, err := store.OpenFile(dir, store.FileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for i := 0; i < 2; i++ {
+		if _, err := st.AppendAudit(context.Background(), audit.Entry{Time: time.Now(), AgentID: "a", OwnerID: "o", Tool: "x", Outcome: audit.OutcomeForwarded}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out.Reset()
+	if err := run(context.Background(), []string{"-config", path, "-verify-audit"}, &out); err != nil {
+		t.Fatalf("-verify-audit while the store is open: %v", err)
+	}
+	if !strings.Contains(out.String(), "audit chain intact: 2 entries checked") {
+		t.Errorf("got %s", out.String())
 	}
 }

@@ -21,9 +21,11 @@ receipts:
   ed25519_key_env: CONSEQUENCE_SIGNING_KEY_ED25519
   mldsa87_key_env: CONSEQUENCE_SIGNING_KEY_MLDSA87
 
-# Uncomment to keep approvals, receipts and the audit log in Postgres.
-# Without it everything lives in memory and is lost on restart.
+# Uncomment one of these to keep approvals, receipts, limits and the audit
+# log across restarts: in Postgres, or in files on this machine. With
+# neither, everything lives in memory and is lost on restart.
 # database_url_env: CONSEQUENCE_DATABASE_URL
+# state_dir: ~/.consequence
 
 # Who may approve held calls. Each approver gets their own approval link,
 # and receipts record which of them said yes.

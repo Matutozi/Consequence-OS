@@ -10,6 +10,8 @@ import (
 	"net/mail"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -76,10 +78,16 @@ type Config struct {
 	// Email sends approvers their links. Without it, links go to the log.
 	Email Email `yaml:"email"`
 
-	// DatabaseURLEnv names the env var holding a Postgres URL. When it's
-	// empty, everything is kept in memory and lost on restart.
+	// DatabaseURLEnv names the env var holding a Postgres URL. When neither
+	// it nor StateDir is set, everything is kept in memory and lost on restart.
 	DatabaseURLEnv string `yaml:"database_url_env"`
 	DatabaseURL    string `yaml:"-"`
+
+	// StateDir is a directory for the file store: state kept on this
+	// machine, with no database. It must be absolute or start with ~/,
+	// which is expanded, because the hook mode runs from each project's
+	// directory. One process at a time may use it.
+	StateDir string `yaml:"state_dir"`
 }
 
 // Owner is an organisation whose agents use the proxy.
@@ -167,10 +175,37 @@ func Parse(data []byte, lookupEnv LookupEnv) (*Config, error) {
 	if err := cfg.resolveSecrets(lookupEnv); err != nil {
 		return nil, err
 	}
+	if err := cfg.resolveStateDir(lookupEnv); err != nil {
+		return nil, err
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// resolveStateDir expands a leading ~/ in state_dir and checks the result
+// is absolute.
+func (c *Config) resolveStateDir(lookupEnv LookupEnv) error {
+	if c.StateDir == "" {
+		return nil
+	}
+	if c.DatabaseURLEnv != "" {
+		return errors.New("set database_url_env or state_dir, not both")
+	}
+	dir := c.StateDir
+	if strings.HasPrefix(dir, "~/") { // a bare ~ never arrives: YAML reads it as null
+		home, ok := lookupEnv("HOME")
+		if !ok || home == "" {
+			return errors.New("state_dir starts with ~ but $HOME is not set")
+		}
+		dir = filepath.Join(home, strings.TrimPrefix(dir, "~"))
+	}
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("state_dir %q must be an absolute path or start with ~/", c.StateDir)
+	}
+	c.StateDir = filepath.Clean(dir)
+	return nil
 }
 
 func (c *Config) applyDefaults() {
