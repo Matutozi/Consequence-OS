@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
-	"strings"
 
 	"github.com/matutozi/consequence-os/internal/policy"
 	"github.com/matutozi/consequence-os/pkg/verify"
@@ -182,20 +180,6 @@ func marshalRaw(v any) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
-}
-
-// summarize describes a call without revealing argument values,
-// e.g. "payments.refund with amount, charge_id".
-func summarize(call toolCall) string {
-	if len(call.args) == 0 {
-		return call.name + " with no arguments"
-	}
-	keys := make([]string, 0, len(call.args))
-	for k := range call.args {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return call.name + " with " + strings.Join(keys, ", ")
 }
 
 // refuse answers a call that won't be forwarded. A tool call gets a tool

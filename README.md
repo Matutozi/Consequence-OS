@@ -488,7 +488,9 @@ Code layout:
 
 - `cmd/consequenced`: the server.
 - `cmd/mockmcp`: the fake upstream and receiver.
-- `internal/policy`, `internal/approval`, `internal/receipt`, `internal/proxy`, `internal/audit`, `internal/store`: the parts of the server.
+- `internal/gate`: the decision path for every gated call: assessing it, the policy, approvals, limits and the audit log. It never answers the agent, so each way in is a thin adapter over it.
+- `internal/proxy`: the HTTP adapter. It authenticates agents, parses MCP messages, words the gate's answer, and forwards allowed calls with a receipt.
+- `internal/policy`, `internal/consequence`, `internal/approval`, `internal/receipt`, `internal/audit`, `internal/store`, `internal/config`: the parts the gate and the proxy are built from.
 - `internal/store/migrations`: SQL migrations, built into the binary and run at startup.
 - `pkg/verify`: the public library for receivers. It covers canonical JSON, the receipt format, the client, and the middleware.
 - `python/`: the same receiver middleware for FastAPI and Starlette.
