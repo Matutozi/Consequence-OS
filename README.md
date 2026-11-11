@@ -190,20 +190,25 @@ rules:
     action: deny
 ```
 
-- **Operators:** `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`.
-- **Text is matched exactly,** unless the condition says `fold: true`. Then outer spaces are ignored and letter case doesn't matter, so `"Production "` matches `production`. It works with `eq`, `ne`, `in` and `not_in`.
+- **Operators:** `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`, `like`, `not_like`.
+- **Patterns:** `like` matches text against a glob, or any of a list of globs, with the same rules as tool patterns: `{ arg: file_path, op: like, value: ["*/.env", "*/.env.*"] }`. `not_like` matches text that fits none of them. Like `ne`, it never matches a missing argument or one that isn't text.
+- **Text is matched exactly,** unless the condition says `fold: true`. Then outer spaces are ignored and letter case doesn't matter, so `"Production "` matches `production`. It works with `eq`, `ne`, `in`, `not_in`, `like` and `not_like`.
 - **Argument names in another letter case:** many tool servers read `Environment` as `environment`. So deny rules, ask rules and limits also match an argument whose name differs only in case. Allow rules need the exact name, and a variant falls through and asks. Either way, a variant can only make the policy stricter.
 - **Missing or wrong-type arguments:** if the argument is missing or the wrong type (for example the amount sent as the text `"10"`), the condition doesn't match and the next rule is checked.
 - **When nothing matches:** calls scoring under `default_allow_below` are allowed and everything else asks. With the default scores, read tools are allowed and everything else asks.
 - **Globs:** `*` matches any run of characters and `?` any one, including `/`. So `resource:file:///etc/*` covers everything under `/etc`, and a catch-all `*` covers reads as well as tools.
 
-**Allow what you trust, rather than deny what you fear.** A rule that matches text can be skipped by a spelling it didn't expect, and the call goes on to the next rule. For an `allow` rule that's safe: the call falls through and asks. For a `deny` or `ask` rule it isn't, especially when an allow-everything rule comes after it. Add `fold: true` to those, or list the values you allow and let everything else ask. `-check` warns about deny and ask rules that depend on exact text:
+**Allow what you trust, rather than deny what you fear.** A rule that matches text can be skipped by a spelling it didn't expect, and the call goes on to the next rule. For an `allow` rule that's safe: the call falls through and asks. For a `deny` or `ask` rule it isn't, especially when an allow-everything rule comes after it. Add `fold: true` to those, or list the values you allow and let everything else ask. `-check` warns about deny and ask rules that depend on exact text, and about deny and ask rules that match a `command` with `like`. A command can be written too many ways for a pattern to catch them all: `git push -f`, `git  push --force`, `sh -c '...'`. Allow the commands you trust instead:
 
 ```yaml
 - name: no-deletes-in-production
   tool: db.delete_rows
   when: { arg: environment, op: eq, value: production, fold: true }   # also "Production", " production"
   action: deny
+- name: safe-git
+  tool: Bash
+  when: { arg: command, op: like, value: ["git status*", "git diff*", "git log*"] }
+  action: allow                 # any other command falls through and asks
 ```
 
 ### Limits and time windows

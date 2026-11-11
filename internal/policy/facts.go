@@ -53,7 +53,13 @@ func validateFact(c Condition) error {
 		return nil
 	}
 	if !c.comparesText() {
-		return fmt.Errorf("consequence: %s is text, so compare it with eq, ne, in or not_in and text values", c.Arg)
+		return fmt.Errorf("consequence: %s is text, so compare it with eq, ne, in, not_in, like or not_like and text values", c.Arg)
+	}
+	if c.Op == OpLike || c.Op == OpNotLike {
+		if kind != listFact {
+			return fmt.Errorf("consequence: %s has a few fixed values, so name them with in or not_in rather than a pattern", c.Arg)
+		}
+		return nil // the values are patterns, not names to check
 	}
 	for _, v := range c.textValues() {
 		switch {
@@ -127,8 +133,8 @@ func (c Conditions) matchFacts(a consequence.Assessment) bool {
 	return true
 }
 
-// matchFact checks one condition. On a list fact, eq and in match when any
-// item does, and ne and not_in when no item does. So
+// matchFact checks one condition. On a list fact, eq, in and like match
+// when any item does, and ne, not_in and not_like when no item does. So
 // { arg: data_classes, op: in, value: [payment] } matches every call that
 // touches payment data, whatever else it touches.
 func (c Condition) matchFact(a consequence.Assessment) bool {
@@ -146,6 +152,8 @@ func (c Condition) matchFact(a consequence.Assessment) bool {
 		positive.Op = OpEq
 	case OpNotIn:
 		positive.Op = OpIn
+	case OpNotLike:
+		positive.Op = OpLike
 	}
 	hit := slices.ContainsFunc(items, func(item string) bool {
 		return positive.matches(map[string]any{c.Arg: item})

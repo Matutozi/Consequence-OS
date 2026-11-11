@@ -36,11 +36,11 @@ rules:
 ```
 
 - **Numbers** (`score`, `blast_radius`) take every operator.
-- **Text** (`reversibility`, `source`) takes `eq`, `ne`, `in` and `not_in`. Values are checked when the config loads, so `irreversible` is refused with a note that it's called `none`.
-- **Lists** (`data_classes`, `owners`, `targets`) take `eq`, `ne`, `in` and `not_in`. `eq` and `in` match when **any** item matches, so `{ arg: data_classes, op: in, value: [payment] }` matches every call that touches payment data, whatever else it touches. `ne` and `not_in` match when **no** item does.
+- **Text** (`reversibility`, `source`) takes `eq`, `ne`, `in` and `not_in`. Each has a few fixed values, so name them rather than use a pattern. Values are checked when the config loads, so `irreversible` is refused with a note that it's called `none`.
+- **Lists** (`data_classes`, `owners`, `targets`) take `eq`, `ne`, `in`, `not_in`, `like` and `not_like`. `eq`, `in` and `like` match when **any** item matches, so `{ arg: data_classes, op: in, value: [payment] }` matches every call that touches payment data, whatever else it touches, and `{ arg: targets, op: like, value: "table:invoice*" }` every call that touches an invoice table. `ne`, `not_in` and `not_like` match when **no** item does.
 - **A missing fact never matches,** like a missing argument. A blast radius of 0 means unknown and counts as missing, as does an empty list. A score of 0 is a real score.
 
-**Allow on lists with `not_in`.** An allow rule with `in` on a list fact lets through a call that touches the listed data *and* anything else. To allow only calls that touch none of the sensitive data, write `{ arg: data_classes, op: not_in, value: [payment, personal, auth] }`. `consequenced -check` warns about allow rules that use `eq` or `in` on a list fact.
+**Allow on lists with `not_in`.** An allow rule with `in` on a list fact lets through a call that touches the listed data *and* anything else. To allow only calls that touch none of the sensitive data, write `{ arg: data_classes, op: not_in, value: [payment, personal, auth] }`. `consequenced -check` warns about allow rules that use `eq`, `in` or `like` on a list fact.
 
 **Put broad deny rules first.** Rules match top to bottom. A `tool: "*"` deny placed after an allow for the same tool never sees that tool's calls.
 

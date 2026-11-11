@@ -14,9 +14,13 @@ import (
 // "production", and the call goes on to later rules, perhaps to an allow.
 // An allow rule that depends on exact text is fine: a variant fails closed.
 //
-// Second, an allow rule that matches a list fact with eq or in. Those match
-// when any item does, so a call touching public data and payment data is
-// allowed by a rule meant for public data.
+// A deny or ask rule that matches a command with like is the same problem,
+// worse: "git push -f", "git  push --force" and "sh -c '...'" are all one
+// command, and no pattern catches every way of writing it.
+//
+// Second, an allow rule that matches a list fact with eq, in or like. Those
+// match when any item does, so a call touching public data and payment data
+// is allowed by a rule meant for public data.
 func (e *Engine) Warnings() []string {
 	var warnings []string
 	for _, r := range e.rules {
@@ -24,10 +28,19 @@ func (e *Engine) Warnings() []string {
 			continue
 		}
 		for _, c := range r.Consequence {
-			if factKinds[c.Arg] == listFact && (c.Op == OpEq || c.Op == OpIn) {
+			if factKinds[c.Arg] != listFact {
+				continue
+			}
+			switch c.Op {
+			case OpEq, OpIn:
 				warnings = append(warnings, fmt.Sprintf(
 					"rule %q: allow matches %s when any one of them is %s, so a call that also touches others is allowed too. "+
 						"To allow only calls that touch none of the others, use not_in with the ones you don't allow.",
+					r.Name, c.Arg, formatList(c.Value)))
+			case OpLike:
+				warnings = append(warnings, fmt.Sprintf(
+					"rule %q: allow matches %s when any one of them is like %s, so a call that also touches others is allowed too. "+
+						"To allow only calls that touch none of the others, use not_like with the ones you don't allow.",
 					r.Name, c.Arg, formatList(c.Value)))
 			}
 		}
@@ -36,20 +49,42 @@ func (e *Engine) Warnings() []string {
 		if r.Action != ActionDeny && r.Action != ActionAsk {
 			continue
 		}
-		args := exactTextArgs(r.When)
-		if len(args) == 0 {
+		args, commands := exactTextArgs(r.When), commandPatterns(r.When)
+		if len(args) == 0 && len(commands) == 0 {
 			continue
 		}
 		next := "later rules"
 		if catchAll := e.laterCatchAllAllow(i); catchAll != "" {
 			next = fmt.Sprintf("rule %q, which allows it", catchAll)
 		}
-		warnings = append(warnings, fmt.Sprintf(
-			"rule %q: %s matches %s only when it is written exactly, so a variant falls through to %s. "+
-				"Add fold: true to the condition, or allow the values you trust and let the rest ask.",
-			r.Name, r.Action, strings.Join(args, " and "), next))
+		if len(args) > 0 {
+			warnings = append(warnings, fmt.Sprintf(
+				"rule %q: %s matches %s only when it is written exactly, so a variant falls through to %s. "+
+					"Add fold: true to the condition, or allow the values you trust and let the rest ask.",
+				r.Name, r.Action, strings.Join(args, " and "), next))
+		}
+		for _, arg := range commands {
+			warnings = append(warnings, fmt.Sprintf(
+				"rule %q: %s matches %s with a pattern, but one command can be written many ways "+
+					"(\"git push -f\", \"git  push --force\", \"sh -c '...'\"), so a variant falls through to %s. "+
+					"Allow the commands you trust and let the rest ask.",
+				r.Name, r.Action, arg, next))
+		}
 	}
 	return warnings
+}
+
+// commandPatterns names the arguments called command (in any letter case)
+// that conditions match with like. (not_like fails closed: a variant
+// still counts as "not like".)
+func commandPatterns(conds Conditions) []string {
+	var args []string
+	for _, c := range conds {
+		if c.Op == OpLike && strings.EqualFold(c.Arg, "command") {
+			args = append(args, c.Arg)
+		}
+	}
+	return args
 }
 
 // exactTextArgs names the arguments that conditions match with eq or in
