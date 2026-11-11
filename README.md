@@ -189,6 +189,7 @@ rules:
 
 - **Operators:** `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`.
 - **Text is matched exactly,** unless the condition says `fold: true`. Then outer spaces are ignored and letter case doesn't matter, so `"Production "` matches `production`. It works with `eq`, `ne`, `in` and `not_in`.
+- **Argument names in another letter case:** many tool servers read `Environment` as `environment`. So deny rules, ask rules and limits also match an argument whose name differs only in case. Allow rules need the exact name, and a variant falls through and asks. Either way, a variant can only make the policy stricter.
 - **Missing or wrong-type arguments:** if the argument is missing or the wrong type (for example the amount sent as the text `"10"`), the condition doesn't match and the next rule is checked.
 - **When nothing matches:** calls scoring under `default_allow_below` are allowed and everything else asks. With the default scores, read tools are allowed and everything else asks.
 - **Globs:** `*` matches any run of characters and `?` any one, including `/`. So `resource:file:///etc/*` covers everything under `/etc`, and a catch-all `*` covers reads as well as tools.

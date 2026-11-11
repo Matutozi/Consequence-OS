@@ -211,6 +211,9 @@ func (e *Engine) Decide(ctx context.Context, c Call, usage UsageCounter) (Decisi
 // matches checks the cheap parts first, so usage is only counted when the
 // tool, time and arguments already fit.
 func (r *Rule) matches(ctx context.Context, c Call, usage UsageCounter) (bool, error) {
+	// Only an allow rule needs exact argument names: for deny and ask, a
+	// name in another letter case must match too, or it would slip past.
+	loose := r.Action != ActionAllow
 	switch {
 	case !matchTool(r.Tool, c.Tool):
 		return false, nil
@@ -218,14 +221,14 @@ func (r *Rule) matches(ctx context.Context, c Call, usage UsageCounter) (bool, e
 		return false, nil
 	case r.Outside != nil && r.Outside.contains(c.At):
 		return false, nil
-	case !r.When.matches(c.Args):
+	case !r.When.matches(c.Args, loose):
 		return false, nil
 	case !r.Consequence.matchFacts(c.Consequence):
 		return false, nil
 	case r.Limit == nil:
 		return true, nil
 	}
-	return r.Limit.exceeded(ctx, r.Tool, c, usage)
+	return r.Limit.exceeded(ctx, r.Tool, c, usage, loose)
 }
 
 // UsageScopes lists the scopes whose limits cover tool: the tool patterns of
@@ -255,7 +258,9 @@ func (e *Engine) UsageRecords(c Call) []UsageRecord {
 			if r.Limit == nil || r.Limit.Sum == "" || r.Tool != scope {
 				continue
 			}
-			if v, ok := toNumber(c.Args[r.Limit.Sum]); ok {
+			// Counted by any letter case of the name, and the largest if
+			// there are several: over-counting is the safe way round.
+			if v, ok := largestNumber(c.Args, r.Limit.Sum); ok {
 				if u.Values == nil {
 					u.Values = map[string]float64{}
 				}

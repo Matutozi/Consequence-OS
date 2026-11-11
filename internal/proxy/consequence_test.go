@@ -87,3 +87,15 @@ func TestRulesSeeTheResolversAssessment(t *testing.T) {
 		t.Errorf("weather.today: %s", body)
 	}
 }
+
+func TestDenyRuleCatchesArgumentNamesInAnotherCase(t *testing.T) {
+	rules := []policy.Rule{
+		{Name: "no-prod-deletes", Tool: "db.delete_rows", When: policy.Conditions{{Arg: "environment", Op: policy.OpEq, Value: "production", Fold: true}}, Action: policy.ActionDeny},
+		{Name: "deletes-otherwise-go", Tool: "db.delete_rows", Action: policy.ActionAllow},
+	}
+	f := newFixtureWithRules(t, nil, rules)
+	body := f.do(http.MethodPost, call("db.delete_rows", `{"Environment":"production","table":"users"}`), nil).Body.String()
+	if !strings.Contains(body, "no-prod-deletes") || f.up.count() != 0 {
+		t.Errorf("a delete with Environment=production got through: %s", body)
+	}
+}

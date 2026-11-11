@@ -64,14 +64,21 @@ func (NoUsage) CountUsage(context.Context, string, string, time.Time, string) (i
 }
 
 // exceeded reports whether this call would take the agent over the limit
-// counted in scope (the rule's tool pattern).
-func (l *Limit) exceeded(ctx context.Context, scope string, c Call, usage UsageCounter) (bool, error) {
+// counted in scope (the rule's tool pattern). With loose, the summed
+// argument may be named in any letter case, as for conditions.
+func (l *Limit) exceeded(ctx context.Context, scope string, c Call, usage UsageCounter, loose bool) (bool, error) {
 	if usage == nil {
 		return false, errors.New("policy: a limit rule needs a usage counter")
 	}
 	var amount float64
 	if l.Sum != "" {
 		v, ok := toNumber(c.Args[l.Sum])
+		if loose {
+			if lowest, found := smallestNumber(c.Args, l.Sum); found && lowest < 0 {
+				return true, nil // any negative amount needs a human, as below
+			}
+			v, ok = largestNumber(c.Args, l.Sum)
+		}
 		if !ok {
 			return false, nil // like a condition: a missing or non-numeric argument doesn't match
 		}
@@ -90,6 +97,27 @@ func (l *Limit) exceeded(ctx context.Context, scope string, c Call, usage UsageC
 		return float64(count+1) > l.Max, nil
 	}
 	return sum+amount > l.Max, nil
+}
+
+// largestNumber returns the largest numeric value among the arguments
+// called name in any letter case, or ok=false when there is none.
+func largestNumber(args map[string]any, name string) (n float64, ok bool) {
+	for _, v := range values(args, name) {
+		if f, isNum := toNumber(v); isNum && (!ok || f > n) {
+			n, ok = f, true
+		}
+	}
+	return n, ok
+}
+
+// smallestNumber is largestNumber's opposite.
+func smallestNumber(args map[string]any, name string) (n float64, ok bool) {
+	for _, v := range values(args, name) {
+		if f, isNum := toNumber(v); isNum && (!ok || f < n) {
+			n, ok = f, true
+		}
+	}
+	return n, ok
 }
 
 func (l *Limit) String() string {
