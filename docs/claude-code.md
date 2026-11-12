@@ -10,55 +10,18 @@ Every call is recorded in a hash-chained audit log on your machine. Nothing leav
 
 ## Setting it up
 
-You need the `consequenced` binary on your `PATH` (see [Install](../README.md#install)). Linux and macOS only.
+For the five-minute version, see [ConsequenceOS on your own machine](personal.md). In short, from the project to guard:
 
-**1. A policy.** Save this as `~/.consequence/claude-code.yaml`, and adjust it:
-
-```yaml
-state_dir: ~/.consequence/state         # the audit log and limits, kept between calls
-local_agent: { id: claude-code, owner_id: me }
-
-tools:                                  # how serious each tool is; unlisted tools count as irreversible
-  Read: read
-  Grep: read
-  Glob: read
-  Edit: reversible
-  Write: reversible
-  Bash: irreversible
-
-rules:
-  # Keep the agent away from the guard itself.
-  - name: guard-the-guard
-    tool: "*"
-    when: { arg: file_path, op: like, value: ["*/.claude/settings*.json", "*/.consequence/*"] }
-    action: deny
-  - name: no-secrets
-    tool: "*"
-    when: { arg: file_path, op: like, value: ["*/.env", "*/.env.*", "*/.ssh/*"], fold: true }
-    action: deny
-  # A link could be swapped for one to a secret between the check and the write.
-  - name: writes-through-links
-    tool: "*"
-    when: { arg: via_symlink, op: eq, value: true }
-    action: ask
-  - name: edits-in-the-project
-    tool: Edit
-    when: { arg: in_project, op: eq, value: true }
-    action: allow
-  - name: safe-git
-    tool: Bash
-    when:
-      - { arg: command, op: like, value: ["git status*", "git diff*", "git log*"] }
-      - { arg: compound, op: eq, value: false }
-    action: allow
-  - name: shell
-    tool: Bash
-    action: ask
+```bash
+consequenced -init claude-code            # this project, in .claude/settings.local.json
+consequenced -init claude-code -global    # every project, in ~/.claude/settings.json
 ```
 
-Check it with `consequenced -hook claude-code -config ~/.consequence/claude-code.yaml -check`. It prints the rules and warns about risky ones.
+It writes the starter policy to `~/.consequence/claude-code.yaml`, unless one is there, and shows the hook entry before adding it. `-config` puts the policy elsewhere; its state goes in a `state` folder beside it. `-yes` skips the question. Change the rules in that file, then check them with `consequenced -hook claude-code -check`. It prints the rules and warns about risky ones. The starter's source, with a comment on every rule, is [internal/hook/starter.yaml](../internal/hook/starter.yaml).
 
-**2. The hook.** Add this to `~/.claude/settings.json` for every project, or to a project's `.claude/settings.json`:
+### By hand
+
+The policy needs `state_dir` and the rules, and nothing about servers or keys. The hook entry `-init` adds looks like this:
 
 ```json
 {
@@ -69,7 +32,7 @@ Check it with `consequenced -hook claude-code -config ~/.consequence/claude-code
         "hooks": [
           {
             "type": "command",
-            "command": "consequenced -hook claude-code -config ~/.consequence/claude-code.yaml",
+            "command": "/usr/local/bin/consequenced -hook claude-code -config /home/you/.consequence/claude-code.yaml",
             "timeout": 30,
             "onFailure": "block"
           }
@@ -80,7 +43,7 @@ Check it with `consequenced -hook claude-code -config ~/.consequence/claude-code
 }
 ```
 
-`onFailure: "block"` matters. Without it, Claude Code lets a tool call run when its hook can't start, crashes or times out. ConsequenceOS blocks every failure it can see by exiting with code 2, but it can't catch a hook that never ran, such as a typo in the command. The setting needs Claude Code v2.1.295 or later.
+`onFailure: "block"` matters. Without it, Claude Code lets a tool call run when its hook can't start, crashes or times out. ConsequenceOS blocks every failure it can see by exiting with code 2. It can't catch a hook that never ran, such as a typo in the command. The setting needs Claude Code v2.1.295 or later.
 
 ## What the policy sees
 
@@ -106,7 +69,7 @@ A deny rule on `git push --force` misses `git push -f`, `git  push --force` and 
 - **Outcomes.** Each call is recorded as `forwarded` (let through to Claude Code), `blocked`, or `asked_user`. ConsequenceOS doesn't learn your answer to an ask.
 - **Contents.** Arguments are stored only as a hash, so a file's contents never reach the log.
 - **Checking it.** Run `consequenced -hook claude-code -config ~/.consequence/claude-code.yaml -verify-audit`.
-- **Limits** count a call when it is allowed or asked, whatever you answered, so they over-count rather than under-count. For example, `{ limit: { max: 20, per: 1h }, action: ask }` on `Bash` asks about every command once 20 have run in an hour.
+- **Limits** count a call when it is allowed or asked, whatever you answered, so they over-count rather than under-count. For example, `{ tool: Bash, limit: { max: 20, per: 1h }, action: ask }` asks about every command once 20 have run in an hour.
 
 ## Failing closed
 
@@ -116,5 +79,5 @@ Any failure blocks the call, and the reason shown to Claude says what went wrong
 
 - **It isn't a sandbox.** Claude Code enforces the hook, not the operating system. Anyone who can edit the settings file can remove it. The starter rules make that hard for the agent, but not impossible.
 - **Shell matching is text matching.** `program` and `compound` make allow-lists safe for simple commands. They don't understand what a program does with its arguments: `git log --output=FILE` writes a file. Keep allow-lists to commands you would run without reading them.
-- **Symlinks are resolved when the hook decides.** A link could still change before the tool runs. That's why writes through links ask, and why a starter rule asks for every `Bash` command, `ln` included.
+- **Symlinks are resolved when the hook decides.** A link could still change before the tool runs. That's why changes through links ask, and why the starter asks for every `Bash` command it doesn't list, `ln` included.
 - **Permission modes.** In `bypassPermissions` mode, a deny still blocks. Whether Claude Code still shows the prompt for an ask isn't documented, so don't rely on it there.

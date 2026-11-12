@@ -22,6 +22,8 @@ const (
 	// ArgViaSymlink is true when any part of a file tool's path that
 	// exists is a symlink. The link could be swapped between the check
 	// and the write, so the starter policy asks for writes through one.
+	// Inside the project only the parts below the project root count: a
+	// project kept in a linked folder is the person's doing, not the agent's.
 	ArgViaSymlink = "via_symlink"
 )
 
@@ -75,7 +77,7 @@ func derive(tool string, args map[string]any, cwd, project string) {
 			args[ArgInProject], args[ArgViaSymlink] = false, true
 			return
 		}
-		resolved, viaSymlink := resolvePath(p, cwd)
+		resolved, viaSymlink := resolvePath(p, cwd, project)
 		if args[t.arg] != nil {
 			args[t.arg] = resolved
 		}
@@ -103,8 +105,9 @@ func shellFacts(cmd string) (program string, compound bool) {
 // symlinks in the part of it that exists, so "notes/../.env" and a link to
 // .env both come out as the real .env. A path that doesn't exist yet (a new
 // file) keeps its missing tail as written. viaSymlink says whether any
-// existing part was a symlink; when that can't be told, it says yes.
-func resolvePath(p, cwd string) (resolved string, viaSymlink bool) {
+// existing part was a symlink, looking no higher than project when p is
+// inside it; when that can't be told, it says yes.
+func resolvePath(p, cwd, project string) (resolved string, viaSymlink bool) {
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(cwd, p)
 	}
@@ -125,13 +128,17 @@ func resolvePath(p, cwd string) (resolved string, viaSymlink bool) {
 	if err != nil {
 		return p, true
 	}
-	return filepath.Join(real, rest), hasSymlink(existing)
+	stop := ""
+	if project = filepath.Clean(project); project != "." && within(existing, project) {
+		stop = project
+	}
+	return filepath.Join(real, rest), hasSymlink(existing, stop)
 }
 
-// hasSymlink reports whether p, or any directory on the way to it, is a
-// symlink. p must exist.
-func hasSymlink(p string) bool {
-	for {
+// hasSymlink reports whether p, or any directory on the way up to stop
+// (not counting stop) or to the root, is a symlink. p must exist.
+func hasSymlink(p, stop string) bool {
+	for p != stop {
 		info, err := os.Lstat(p)
 		if err != nil || info.Mode()&os.ModeSymlink != 0 {
 			return true
@@ -142,6 +149,7 @@ func hasSymlink(p string) bool {
 		}
 		p = parent
 	}
+	return false
 }
 
 // resolveDir resolves symlinks in a directory, so a project under a linked

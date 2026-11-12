@@ -21,9 +21,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/matutozi/consequence-os/internal/approval"
@@ -101,14 +103,31 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	verifyAudit := fs.Bool("verify-audit", false, "check the stored audit log's hash chain and exit; fails if it was tampered with")
 	auditHead := fs.String("audit-head", "", "with -verify-audit: a signed head saved from GET /v1/audit/head; the log must still contain it")
 	hookName := fs.String("hook", "", "run as a hook for this agent (claude-code): read one tool call on stdin, answer on stdout, exit 2 to block")
+	initName := fs.String("init", "", "set up the hook for this agent (claude-code): write a starter policy and add the hook to its settings")
+	global := fs.Bool("global", false, "with -init: add the hook to ~/.claude/settings.json, for every project, instead of this project's .claude/settings.local.json")
+	yes := fs.Bool("yes", false, "with -init: change the settings without asking")
+	showLog := fs.Bool("log", false, "print recent decisions from the audit log and exit")
+	logCount := fs.Int("n", 20, "with -log: how many decisions to print")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	configSet := false
+	fs.Visit(func(f *flag.Flag) { configSet = configSet || f.Name == "config" })
+	if (*hookName != "" || *initName != "") && !configSet {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		*configPath = filepath.Join(home, ".consequence", "claude-code.yaml")
+	}
+	if *initName != "" {
+		return runInit(*initName, *configPath, *global, *yes, out)
 	}
 	if *hookName != "" {
 		if *auditHead != "" {
 			return errors.New("-audit-head needs the server's config: the hook has no signing keys")
 		}
-		return runHook(ctx, *hookName, *configPath, *check, *verifyAudit, out)
+		return runHook(ctx, hookRun{name: *hookName, configPath: *configPath, check: *check, verifyAudit: *verifyAudit, log: *showLog, n: *logCount}, out)
 	}
 	if *showVersion {
 		fmt.Fprintln(out, "consequenced", version)
@@ -128,6 +147,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 
 	switch {
+	case *showLog:
+		return printLog(ctx, out, cfg, *logCount)
 	case *verifyAudit:
 		return checkAuditChain(ctx, out, cfg, *auditHead)
 	case *tool != "":
@@ -140,40 +161,107 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	return serve(ctx, cfg, engine)
 }
 
+// hookRun is what -hook was asked to do.
+type hookRun struct {
+	name, configPath        string
+	check, verifyAudit, log bool
+	n                       int
+}
+
 // runHook answers one Claude Code tool call. With check, it checks the
 // hook's config and prints a summary instead; with verifyAudit, it checks
-// the hook's audit log.
-func runHook(ctx context.Context, name, configPath string, check, verifyAudit bool, out io.Writer) error {
-	if name != "claude-code" {
-		return fmt.Errorf("-hook %q: the only hook is claude-code", name)
+// the hook's audit log; with log, it prints recent decisions.
+func runHook(ctx context.Context, h hookRun, out io.Writer) error {
+	if h.name != "claude-code" {
+		return fmt.Errorf("-hook %q: the only hook is claude-code", h.name)
 	}
-	if verifyAudit {
-		cfg, err := config.LoadLocal(configPath, os.LookupEnv)
-		if err != nil {
-			return err
+	if !h.check && !h.verifyAudit && !h.log {
+		code := hook.Run(ctx, stdin, out, stderr, hook.Options{ConfigPath: h.configPath, LookupEnv: os.LookupEnv})
+		if code != hook.ExitOK {
+			return exitCode(code)
 		}
-		return checkAuditChain(ctx, out, cfg, "")
-	}
-	if check {
-		cfg, err := config.LoadLocal(configPath, os.LookupEnv)
-		if err != nil {
-			return err
-		}
-		engine, err := cfg.NewEngine()
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "config OK for the Claude Code hook\n  state_dir:         %s\n  agent:             %s (owner %s)\n",
-			cfg.StateDir, cfg.LocalAgent.ID, cfg.LocalAgent.OwnerID)
-		printPolicy(out, cfg)
-		printWarningList(out, append(engine.Warnings(), hook.Warnings(cfg.Rules)...))
 		return nil
 	}
-	code := hook.Run(ctx, stdin, out, stderr, hook.Options{ConfigPath: configPath, LookupEnv: os.LookupEnv})
-	if code != hook.ExitOK {
-		return exitCode(code)
+	cfg, err := config.LoadLocal(h.configPath, os.LookupEnv)
+	if err != nil {
+		return err
 	}
+	switch {
+	case h.verifyAudit:
+		return checkAuditChain(ctx, out, cfg, "")
+	case h.log:
+		return printLog(ctx, out, cfg, h.n)
+	}
+	return printHookSummary(out, cfg)
+}
+
+func printHookSummary(out io.Writer, cfg *config.Config) error {
+	engine, err := cfg.NewEngine()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "config OK for the Claude Code hook\n  state_dir:         %s\n  agent:             %s (owner %s)\n",
+		cfg.StateDir, cfg.LocalAgent.ID, cfg.LocalAgent.OwnerID)
+	printPolicy(out, cfg)
+	printWarningList(out, append(engine.Warnings(), hook.Warnings(cfg.Rules)...))
 	return nil
+}
+
+// runInit sets up the Claude Code hook, then checks the result.
+func runInit(name, configPath string, global, yes bool, out io.Writer) error {
+	if name != "claude-code" {
+		return fmt.Errorf("-init %q: the only hook is claude-code", name)
+	}
+	configPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return err
+	}
+	settings := filepath.Join(".claude", "settings.local.json")
+	if global {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		settings = filepath.Join(home, ".claude", "settings.json")
+	}
+	if settings, err = filepath.Abs(settings); err != nil {
+		return err
+	}
+	err = hook.Init(hook.InitOptions{
+		ConfigPath: configPath, SettingsPath: settings, Command: hook.Command(executable(), configPath),
+		Yes: yes, In: stdin, Out: out,
+	})
+	if err != nil {
+		return err
+	}
+	cfg, err := config.LoadLocal(configPath, os.LookupEnv)
+	if err != nil {
+		return fmt.Errorf("the policy at %s doesn't load: %w", configPath, err)
+	}
+	fmt.Fprintln(out)
+	if err := printHookSummary(out, cfg); err != nil {
+		return err
+	}
+	flagConfig := ""
+	if def, err := os.UserHomeDir(); err != nil || configPath != filepath.Join(def, ".consequence", "claude-code.yaml") {
+		flagConfig = " -config " + hook.ShellQuote(configPath)
+	}
+	fmt.Fprintf(out, "\nNext:\n"+
+		"  - Restart Claude Code so it loads the hook.\n"+
+		"  - See its decisions:        consequenced -hook claude-code -log%[1]s\n"+
+		"  - Change the rules in %[2]s, then check them: consequenced -hook claude-code -check%[1]s\n", flagConfig, configPath)
+	return nil
+}
+
+// executable is the path the hook command should run. A binary from go
+// run lives in a temporary directory that is gone afterwards, so that case
+// falls back to finding consequenced on the PATH.
+func executable() string {
+	exe, err := os.Executable()
+	if err != nil || strings.Contains(exe, "go-build") || strings.HasPrefix(exe, os.TempDir()) {
+		return "consequenced"
+	}
+	return exe
 }
 
 // withListen returns the process environment, with -listen (when given)
@@ -309,14 +397,7 @@ func checkAuditChain(ctx context.Context, out io.Writer, cfg *config.Config, hea
 		v.ExpectHead(head.Seq, head.Hash)
 		fmt.Fprintf(out, "saved head: entry %d, signed %s\n", head.Seq, head.SignedAt.Format(time.RFC3339))
 	}
-	var st store.Store
-	var err error
-	if cfg.StateDir != "" {
-		// Read-only, so the check works while a server has the directory open.
-		st, err = store.OpenFile(cfg.StateDir, store.FileOptions{ReadOnly: true})
-	} else {
-		st, err = store.OpenPostgres(ctx, cfg.DatabaseURL)
-	}
+	st, err := openForReading(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -342,6 +423,49 @@ func checkAuditChain(ctx context.Context, out io.Writer, cfg *config.Config, hea
 	}
 	fmt.Fprintln(out)
 	return nil
+}
+
+// openForReading opens the configured store to read it: the file store
+// read-only, so it works while a server or hook has it open.
+func openForReading(ctx context.Context, cfg *config.Config) (store.Store, error) {
+	if cfg.StateDir != "" {
+		return store.OpenFile(cfg.StateDir, store.FileOptions{ReadOnly: true})
+	}
+	if cfg.DatabaseURL != "" {
+		return store.OpenPostgres(ctx, cfg.DatabaseURL)
+	}
+	return nil, errors.New("this needs database_url_env or state_dir: the in-memory store keeps no log between runs")
+}
+
+// printLog prints the n most recent audit entries, oldest first, one line each.
+func printLog(ctx context.Context, out io.Writer, cfg *config.Config, n int) error {
+	if n <= 0 {
+		return errors.New("-n must be at least 1")
+	}
+	st, err := openForReading(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	entries, err := st.ListAudit(ctx, audit.Filter{Limit: n})
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		fmt.Fprintln(out, "no decisions recorded yet")
+		return nil
+	}
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "TIME\tOUTCOME\tTOOL\tRULE\tSCORE\tDETAIL")
+	for i := len(entries) - 1; i >= 0; i-- { // ListAudit is newest first
+		e := entries[i]
+		detail := e.Detail
+		if e.ApprovalID != "" {
+			detail = strings.TrimSpace(detail + " " + e.ApprovalID)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n", e.Time.Local().Format("2006-01-02 15:04:05"), e.Outcome, e.Tool, e.Rule, e.Score, detail)
+	}
+	return tw.Flush()
 }
 
 // loadSavedHead reads a signed head and checks its signatures with this

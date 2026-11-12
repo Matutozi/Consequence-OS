@@ -1,0 +1,98 @@
+# ConsequenceOS policy for Claude Code, written by consequenced -init claude-code.
+# Rules are checked top to bottom, and the first match wins. A call no rule
+# matches is allowed if it scores under default_allow_below (reads score 0),
+# and asks otherwise. See docs/claude-code.md.
+#
+# deny: blocked, and Claude is told why.
+# ask: Claude Code asks you first.
+# allow: ConsequenceOS says nothing, and Claude Code's own permissions apply.
+
+state_dir: {{STATE_DIR}}   # the audit log and limits; see them with consequenced -hook claude-code -log
+local_agent: { id: claude-code, owner_id: me }
+
+# How serious each tool is. A tool not listed here counts as irreversible,
+# so it asks unless a rule allows it.
+tools:
+  Read: read
+  Grep: read
+  Glob: read
+  LS: read
+  NotebookRead: read
+  WebSearch: read
+  # Claude Code's own bookkeeping, which changes nothing outside the session.
+  TodoWrite: read
+  Task: read
+  Agent: read
+  AskUserQuestion: read
+  EnterPlanMode: read
+  ExitPlanMode: read
+  ToolSearch: read
+  Skill: read
+  BashOutput: read
+  KillShell: read
+  ListMcpResourcesTool: read
+  ReadMcpResourceTool: read
+  # Changes you can undo with git.
+  Edit: reversible
+  MultiEdit: reversible
+  Write: reversible
+  NotebookEdit: reversible
+  # A shell command can do anything.
+  Bash: irreversible
+  PowerShell: irreversible
+
+rules:
+  # Keep the agent away from the guard: Claude Code's settings, where this
+  # hook is set up, and this policy and its audit log.
+  - name: guard-the-guard
+    tool: "*"
+    when: { arg: file_path, op: like, value: ["*/.claude/settings*.json", "{{CONSEQUENCE_DIR}}/*"] }
+    action: deny
+
+  - name: no-secrets
+    tool: "*"
+    when: { arg: file_path, op: like, value: ["*/.env", "*/.env.*", "*/.ssh/*", "*/.aws/*", "*/.netrc", "*.pem", "*id_rsa*", "*id_ed25519*"], fold: true }
+    action: deny
+
+  # A symlink could be swapped for one to a secret between this check and
+  # the write, so changes through a link ask.
+  - name: changes-through-links
+    tool: "*"
+    when: { arg: via_symlink, op: eq, value: true }
+    consequence: { arg: reversibility, op: ne, value: read }
+    action: ask
+
+  # Changes to files in the project go ahead (Claude Code may still ask, by
+  # its own settings). Anywhere else, they ask.
+  - name: edits-in-the-project
+    tool: Edit
+    when: { arg: in_project, op: eq, value: true }
+    action: allow
+  - name: multi-edits-in-the-project
+    tool: MultiEdit
+    when: { arg: in_project, op: eq, value: true }
+    action: allow
+  - name: writes-in-the-project
+    tool: Write
+    when: { arg: in_project, op: eq, value: true }
+    action: allow
+  - name: notebook-edits-in-the-project
+    tool: NotebookEdit
+    when: { arg: in_project, op: eq, value: true }
+    action: allow
+
+  # Shell commands that only look. Only when compound is false: otherwise
+  # "git status; rm -rf ~" would pass as "git status". Tests and builds run
+  # code the agent can edit, so they ask; add them here if you trust that.
+  - name: commands-that-only-look
+    tool: Bash
+    when:
+      - { arg: command, op: like, value: ["git status*", "git diff*", "git log*", "git show*", "git branch", "git branch --show-current", "ls", "ls *", "pwd"] }
+      - { arg: command, op: not_like, value: ["*--output*", "*--ext-diff*"] }
+      - { arg: compound, op: eq, value: false }
+    action: allow
+
+  # Every other shell command asks.
+  - name: other-commands
+    tool: Bash
+    action: ask

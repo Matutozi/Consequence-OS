@@ -366,3 +366,72 @@ func TestHookVerifyAudit(t *testing.T) {
 		t.Errorf("-audit-head with the hook: err = %v", err)
 	}
 }
+
+func TestInitAndLog(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	path := filepath.Join(root, "dot-consequence", "claude-code.yaml")
+	stdin, stderr = strings.NewReader(""), &bytes.Buffer{}
+	t.Cleanup(func() { stdin, stderr = os.Stdin, os.Stderr })
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-init", "claude-code", "-config", path, "-yes"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Wrote the starter policy to " + path,
+		"Added the hook to " + filepath.Join(project, ".claude", "settings.local.json"),
+		"config OK for the Claude Code hook",
+		"consequenced -hook claude-code -log -config " + path,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "warnings (") {
+		t.Errorf("the starter has warnings:\n%s", out.String())
+	}
+	settings, err := os.ReadFile(filepath.Join(project, ".claude", "settings.local.json"))
+	if err != nil || !strings.Contains(string(settings), "-hook claude-code -config "+path) {
+		t.Fatalf("settings: %s %v", settings, err)
+	}
+
+	// Two calls through the hook, then the log.
+	for _, cmd := range []string{"git status", "make deploy"} {
+		stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","cwd":"` + project + `","tool_name":"Bash","tool_input":{"command":"` + cmd + `"}}`)
+		if err := run(context.Background(), []string{"-hook", "claude-code", "-config", path}, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out.Reset()
+	if err := run(context.Background(), []string{"-hook", "claude-code", "-config", path, "-log", "-n", "5"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[1], "forwarded") || !strings.Contains(lines[1], "commands-that-only-look") ||
+		!strings.Contains(lines[2], "asked_user") || !strings.Contains(lines[2], "other-commands") {
+		t.Errorf("log:\n%s", out.String())
+	}
+
+	// Saying no to a global install leaves the user's settings alone.
+	t.Setenv("HOME", root)
+	stdin = strings.NewReader("no\n")
+	out.Reset()
+	if err := run(context.Background(), []string{"-init", "claude-code", "-config", path, "-global"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".claude", "settings.json")); !os.IsNotExist(err) {
+		t.Errorf("saying no wrote the global settings:\n%s", out.String())
+	}
+}
+
+func TestLogNeedsAStore(t *testing.T) {
+	err := run(context.Background(), []string{"-config", writeTestConfig(t, ""), "-log"}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "needs database_url_env or state_dir") {
+		t.Errorf("err = %v", err)
+	}
+}

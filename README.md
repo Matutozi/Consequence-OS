@@ -36,13 +36,14 @@ Any action an agent takes through an MCP tool, and anything it reads through MCP
 
 All of these, written out, are in [examples/policies.yaml](examples/policies.yaml). The quickstart below uses refunds only because they're easy to picture.
 
-It can also guard **Claude Code's own tools**, such as file edits and shell commands, which don't go through MCP. It runs as a hook on your machine, with no server and no database. See [Guarding Claude Code](docs/claude-code.md).
+It can also guard **Claude Code's own tools**, such as file edits and shell commands, which don't go through MCP. It runs as a hook on your machine, with no server and no database. Set it up with `consequenced -init claude-code`. See [ConsequenceOS on your own machine](docs/personal.md).
 
 ## Guides
 
 - [Connecting an agent](docs/agents.md): point an MCP client at ConsequenceOS, and handle allowed, blocked and held calls. There's a runnable [Python agent example](examples/python-agent/agent.py).
 - [Protecting a tool server](docs/receivers.md): refuse calls without a valid receipt, in Go, Python or any language.
 - [Consequence](docs/consequence.md): the score each call gets, the facts rules can match on, and what the assessment doesn't cover yet.
+- [ConsequenceOS on your own machine](docs/personal.md): guard Claude Code on your own repositories in five minutes, with `consequenced -init claude-code`.
 - [Guarding Claude Code](docs/claude-code.md): a policy on every file edit and shell command, as a Claude Code hook.
 - [Policy](#policy) and [configuration](#configuration) are below.
 
