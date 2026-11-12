@@ -141,7 +141,7 @@ To stop the stack and delete its data, run `docker compose down -v`.
 
 1. The agent sends an MCP `tools/call` to `POST /mcp` with its API key.
 2. ConsequenceOS checks that the request can't be read two ways: no batches, no duplicate keys, no keys differing only in case, and envelope headers that match the body.
-3. The policy decides **allow**, **ask** or **deny**. `resources/read` and `prompts/get` are decided too (see [Reads](#reads)). Tool listings are checked against the tools' pinned definitions on their way back (see [Tool definitions](#tool-definitions)). Everything else passes through untouched.
+3. The policy decides **allow**, **ask** or **deny**. `resources/read` and `prompts/get` are decided too (see [Reads](#reads)). Tool listings are checked against the tools' pinned definitions on their way back (see [Tool definitions](#tool-definitions)), and so are requests the server makes of the client (see [Requests from the server](#requests-from-the-server)). Everything else passes through untouched.
 4. **deny**: the agent gets an error result and nothing is forwarded.
 5. **ask**: an approval is opened and each approver gets an email with their own link. The agent gets an "approval pending" result. Once someone approves, the same agent making the same call with the same arguments gets through once, within the validity window (10 minutes by default). If nobody decides within the approval timeout (1 hour by default), the request expires and the audit log records it.
 6. **allow**, or an approved retry: ConsequenceOS signs a receipt, writes the audit entry, and forwards the call. The receipt goes in the `X-Consequence-Receipt` header and in `params._meta.consequenceReceipt`.
@@ -308,6 +308,30 @@ What it doesn't cover:
 - **New tools.** A tool listed for the first time is pinned as it is. Unlisted in `tools`, it counts as irreversible, so it asks unless a rule allows it.
 - **Calls made before the listing.** A change is known once the server lists it.
 - **Prompts and resources.** Their listings aren't pinned yet.
+
+### Requests from the server
+
+During a call, an MCP server can ask the client for things. With elicitation, it asks the user for input. With sampling, it asks the client's model to write a message. With roots, it asks which folders the client may use. A compromised server could use elicitation to ask the user for a password. So these requests go past the policy too, under the names `server:elicitation`, `server:sampling`, `server:roots`, or `server:` and the method, with the request's params as the arguments:
+
+```yaml
+- name: no-secret-prompts
+  tool: server:elicitation
+  when: { arg: message, op: like, value: ["*password*", "*api key*", "*private key*", "*seed phrase*"], fold: true }
+  action: deny
+- name: sign-in-pages-ask       # an elicitation that sends the user to a URL
+  tool: server:elicitation
+  when: { arg: mode, op: eq, value: url }
+  action: ask
+- name: no-sampling
+  tool: server:sampling
+  action: deny
+```
+
+- **Unlisted, they count as reads,** so by default they're allowed, as before, and audited. Clients already show these requests to the user. A catch-all `*` rule does cover them, as it covers reads. The shipped config and the Claude Code starter policy deny elicitations that ask for a password, key or seed phrase. A server that needs the user to sign in should send them to a sign-in page, with an elicitation in `url` mode.
+- **Both forms are checked.** Servers on protocol versions before 2026-07-28 send a JSON-RPC request, in an SSE stream or on a stdio line. A refused request never reaches the client. ConsequenceOS answers the server itself, so it doesn't wait. An elicitation is declined, as a user would decline it, and anything else gets an error. Over HTTP, the answer is posted in the agent's session. On 2026-07-28, the server returns an `input_required` result listing what it needs. If any of those requests is refused, the whole result is replaced with a refusal the agent can read.
+- **Ask** holds the request for a person, as for a call: the approver sees the server's message and what it asks for. Meanwhile the server is told no. Once approved, the same request goes through once, the next time the server makes it.
+- **Fails closed:** a message from the server that isn't strict JSON (duplicate keys, invalid UTF-8, the `NaN` that some parsers accept) isn't passed on, since a lenient client could read a request in it. Neither are params with keys that differ only in letter case. With `-stdio`, a server's input request may not use the wrapper's own question key, `consequenceos_approval`.
+- **Answers are read whole to be checked,** so an answer over 16 MiB, or one compressed when ConsequenceOS didn't ask, isn't passed on. SSE streams are read an event at a time, so events still arrive as they come.
 
 ## Audit log
 
@@ -556,7 +580,7 @@ It starts the real server and relays messages both ways. Tool calls, resource re
 - **The token stays out of the agent's hands.** The server gets `PATH`, `HOME` and a few other basics, the env vars named in `stdio_env`, and the lines of `stdio_env_file`. It gets nothing else from the agent's environment. Put a token in that file (mode `600`, which is enforced), not in the agent's MCP config. The Claude Code hook's starter policy keeps the agent out of `~/.consequence`, so keep the file there.
 - **Tool definitions are pinned,** as over HTTP (see [Tool definitions](#tool-definitions)), per server command line. `consequenced -tools` and `consequenced -accept-tool` use the same config as the wrapper.
 - **Failing closed.** If the server exits, every call still waiting for it gets an error, and the wrapper exits. If the policy's state can't be opened, the call isn't forwarded. The wrapper opens the state between calls, not for its whole life, so `-approve`, the hook, and wrappers for other servers can share one `state_dir`.
-- **Not checked yet.** Requests the server sends to the client, such as sampling or elicitation, pass through unchecked, as over HTTP. Receipts aren't added: the server is a process you chose to run, not a receiver, and any receipt the agent puts in a call is removed.
+- **Requests from the server** go past the policy, as over HTTP (see [Requests from the server](#requests-from-the-server)). A refused one never reaches the client, and the wrapper answers the server itself. Receipts aren't added: the server is a process you chose to run, not a receiver, and any receipt the agent puts in a call is removed.
 
 ## Running without Docker
 
@@ -637,7 +661,8 @@ This is an early MVP. Built:
 - a Claude Code hook, which applies the policy to Claude Code's built-in tools;
 - pinned tool definitions: a changed tool is hidden from the model and asks until accepted, and arguments its schema doesn't name are refused;
 - signing key rotation, with old keys kept for saved audit heads, and offline receivers that pick up new keys by themselves;
-- archiving old audit entries to a file that can be checked on its own, without breaking the chain.
+- archiving old audit entries to a file that can be checked on its own, without breaking the chain;
+- policy checks on what the server asks of the client: elicitation, sampling and roots.
 
 Not yet:
 - passkey-signed approvals.

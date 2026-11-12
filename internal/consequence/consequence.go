@@ -97,16 +97,25 @@ type Resolver interface {
 	Assess(ctx context.Context, tool string, args map[string]any) (Assessment, error)
 }
 
-// Resource reads and prompt fetches are assessed, and go past the policy,
-// under these names: "resource:" plus the URI, and "prompt:" plus the
-// prompt's name. MCP tool names can't contain ":", so they can't collide.
+// Resource reads, prompt fetches and requests the server makes of the
+// client are assessed, and go past the policy, under these names:
+// "resource:" plus the URI, "prompt:" plus the prompt's name, and
+// "server:" plus what the server asks for (server:elicitation,
+// server:sampling). MCP tool names can't contain ":", so they can't
+// collide.
 const (
 	ResourcePrefix = "resource:"
 	PromptPrefix   = "prompt:"
+	ServerPrefix   = "server:"
 )
 
-// IsRead reports whether name is a resource read or a prompt fetch rather
-// than a tool call.
+// IsRead reports whether name is anything but a tool call: a resource
+// read, a prompt fetch, or a request from the server. None of them counts
+// as irreversible unless the tools map says so.
 func IsRead(name string) bool {
-	return strings.HasPrefix(name, ResourcePrefix) || strings.HasPrefix(name, PromptPrefix)
+	return strings.HasPrefix(name, ResourcePrefix) || strings.HasPrefix(name, PromptPrefix) || IsServerRequest(name)
 }
+
+// IsServerRequest reports whether name is a request the server makes of
+// the client, such as server:elicitation.
+func IsServerRequest(name string) bool { return strings.HasPrefix(name, ServerPrefix) }

@@ -234,7 +234,8 @@ func TestFailuresBlock(t *testing.T) {
 		{"duplicate keys", strings.Replace(good, `{"file_path":"/x"}`, `{"file_path":"/x","file_path":"/y"}`, 1), nil, "ambiguous"},
 		{"another hook event", strings.Replace(good, "PreToolUse", "PostToolUse", 1), nil, `not "PostToolUse"`},
 		{"no tool", strings.Replace(good, `"tool_name":"Read"`, `"tool_name":""`, 1), nil, "names no tool"},
-		{"a tool posing as a read", strings.Replace(good, `"tool_name":"Read"`, `"tool_name":"resource:x"`, 1), nil, "resource: or prompt:"},
+		{"a tool posing as a read", strings.Replace(good, `"tool_name":"Read"`, `"tool_name":"resource:x"`, 1), nil, "resource:, prompt: or server:"},
+		{"a tool posing as a server request", strings.Replace(good, `"tool_name":"Read"`, `"tool_name":"server:elicitation"`, 1), nil, "resource:, prompt: or server:"},
 		{"tool_input not an object", strings.Replace(good, `{"file_path":"/x"}`, `[1]`, 1), nil, "must be a JSON object"},
 		{"no config", good, func(o *Options) { o.ConfigPath = "/does/not/exist.yaml" }, "config can't be loaded"},
 	}

@@ -113,7 +113,7 @@ func parseToolCall(msg message) (toolCall, *rpcError) {
 	if policy.IsRead(call.name) {
 		// Otherwise a tool named "resource:x" would be judged by the rules
 		// written for reading resources.
-		return call, &rpcError{http.StatusBadRequest, codeInvalidParams, "tool names may not start with resource: or prompt:"}
+		return call, &rpcError{http.StatusBadRequest, codeInvalidParams, "tool names may not start with resource:, prompt: or server:"}
 	}
 	call.rawArgs = msg.params["arguments"]
 	if len(call.rawArgs) > 0 && string(call.rawArgs) != "null" {

@@ -24,15 +24,15 @@ func testIssuer(t *testing.T) *receipt.Issuer {
 	return receipt.NewIssuer(keys, "http://cos.test", time.Minute, nil)
 }
 
-// forwarded is what the upstream received for the last call.
-type forwarded struct {
+// upstreamGot is what the upstream received for the last call.
+type upstreamGot struct {
 	header    string          // X-Consequence-Receipt
 	meta      json.RawMessage // params._meta.consequenceReceipt
 	tool      string
 	arguments json.RawMessage
 }
 
-func lastForwarded(t *testing.T, f fixture) forwarded {
+func lastForwarded(t *testing.T, f fixture) upstreamGot {
 	t.Helper()
 	req, body := f.up.last()
 	var msg struct {
@@ -45,7 +45,7 @@ func lastForwarded(t *testing.T, f fixture) forwarded {
 	if err := json.Unmarshal([]byte(body), &msg); err != nil {
 		t.Fatalf("upstream got invalid JSON: %v", err)
 	}
-	return forwarded{
+	return upstreamGot{
 		header: req.Header.Get(verify.HeaderName), meta: msg.Params.Meta[verify.MetaKey],
 		tool: msg.Params.Name, arguments: msg.Params.Arguments,
 	}

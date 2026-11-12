@@ -178,7 +178,24 @@ func wants(a Approval) string {
 	if name, ok := strings.CutPrefix(a.Tool, policy.PromptPrefix); ok {
 		return "get the prompt " + name
 	}
+	if what, ok := strings.CutPrefix(a.Tool, policy.ServerPrefix); ok {
+		return "let its MCP server " + ServerAsk(what)
+	}
 	return "run " + a.Tool
+}
+
+// ServerAsk says what a server request asks for, from the part of its
+// name after "server:": "ask the user for input" for elicitation.
+func ServerAsk(what string) string {
+	switch what {
+	case "elicitation":
+		return "ask the user for input"
+	case "sampling":
+		return "have the client's model write a message"
+	case "roots":
+		return "list the client's roots, the folders it may use"
+	}
+	return "send the client a " + what + " request"
 }
 
 // argRows turns the canonical arguments into name/value rows, sorted by

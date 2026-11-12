@@ -120,7 +120,7 @@ func TestReads(t *testing.T) {
 		},
 		{
 			name: "a tool can't pose as a resource", body: call("resource:file:///notes/a", `{}`),
-			wantStatus: 400, wantInBody: "may not start with resource: or prompt:", wantOutcome: audit.OutcomeRejected,
+			wantStatus: 400, wantInBody: "may not start with resource:, prompt: or server:", wantOutcome: audit.OutcomeRejected,
 		},
 		{
 			name: "control characters in a tool name are refused", body: call(`notes.read\u0000x`, `{}`),

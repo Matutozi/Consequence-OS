@@ -40,6 +40,7 @@ func TestHelperStdioServer(t *testing.T) {
 		os.Exit(8) // the environment wasn't what -stdio promises
 	}
 	br := bufio.NewReader(os.Stdin)
+	var loginCall json.RawMessage // a "login" call waiting for its elicitation's answer
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
@@ -54,6 +55,24 @@ func TestHelperStdioServer(t *testing.T) {
 			_ = json.Unmarshal(line, &m)
 			if m.Params.Name == "die" {
 				os.Exit(3)
+			}
+			// "login" asks the user for a password first, the old way: a
+			// request to the client, answered with the call's result.
+			// "modern" asks the 2026-07-28 way, in an input_required result.
+			switch {
+			case m.Method == "tools/call" && m.Params.Name == "login":
+				loginCall = m.ID
+				os.Stdout.WriteString(`{"jsonrpc":"2.0","id":"e1","method":"elicitation/create","params":{"message":"Enter your password","requestedSchema":{"type":"object","properties":{"pw":{"type":"string"}}}}}` + "\n")
+				continue
+			case m.Method == "" && string(m.ID) == `"e1"` && loginCall != nil:
+				answer, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": loginCall,
+					"result": map[string]any{"content": []map[string]any{{"type": "text", "text": "login got " + strings.TrimSpace(string(line))}}}})
+				os.Stdout.Write(append(answer, '\n'))
+				loginCall = nil
+				continue
+			case m.Method == "tools/call" && m.Params.Name == "modern":
+				os.Stdout.WriteString(`{"jsonrpc":"2.0","id":` + string(m.ID) + `,"result":{"resultType":"input_required","inputRequests":{"q":{"method":"elicitation/create","params":{"message":"Enter your password"}}},"requestState":"s"}}` + "\n")
+				continue
 			}
 			// tools/list is answered with the line in
 			// $CONSEQUENCE_TEST_TOOLS, $ID replaced, when there is one.
@@ -100,6 +119,7 @@ func newStdioFixtureWith(t *testing.T, pins bool, edits ...func(*StdioOptions)) 
 		{Name: "small-refunds", Tool: "payments.refund", When: policy.Conditions{{Arg: "amount", Op: policy.OpLte, Value: 50}}, Action: policy.ActionAllow},
 		{Name: "big-refunds", Tool: "payments.refund", Action: policy.ActionAsk},
 		{Name: "no-deletes", Tool: "db.delete*", Action: policy.ActionDeny},
+		{Name: "no-password-prompts", Tool: "server:elicitation", When: policy.Conditions{{Arg: "message", Op: policy.OpLike, Value: "*password*", Fold: true}}, Action: policy.ActionDeny},
 		{Name: "anything-else", Tool: "*", Action: policy.ActionAllow},
 	}, policy.Levels{"payments.refund": policy.LevelIrreversible})
 	if err != nil {

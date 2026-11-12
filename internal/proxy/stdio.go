@@ -91,7 +91,7 @@ func RunStdio(ctx context.Context, in io.Reader, out io.Writer, opts StdioOption
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("stdio: start %s: %w", opts.Command[0], err)
 	}
-	s := &stdio{opts: opts, client: &lineWriter{w: out}, server: toServer, waiting: map[string]bool{}, listings: map[string]json.RawMessage{}, askKey: newAskKey()}
+	s := &stdio{opts: opts, client: &lineWriter{w: out}, server: toServer, waiting: map[string]string{}, listings: map[string]json.RawMessage{}, askKey: newAskKey()}
 
 	serverDone := make(chan struct{})
 	go func() {
@@ -124,13 +124,14 @@ func RunStdio(ctx context.Context, in io.Reader, out io.Writer, opts StdioOption
 }
 
 type stdio struct {
-	opts   StdioOptions
-	client *lineWriter
-	server io.Writer // only relayFromClient writes to it
-	askKey []byte    // signs the requestState of questions asked in the client
+	opts     StdioOptions
+	client   *lineWriter
+	server   io.Writer // the server's stdin; written under serverMu
+	serverMu sync.Mutex
+	askKey   []byte // signs the requestState of questions asked in the client
 
 	mu      sync.Mutex
-	waiting map[string]bool // IDs of requests sent to the server and not yet answered
+	waiting map[string]string // IDs of requests sent to the server and not yet answered, and their methods
 	// listings holds the tools/list requests not yet answered: each ID in
 	// canonical form (listingID), and as the client sent it.
 	listings map[string]json.RawMessage
@@ -158,18 +159,22 @@ func (l *lineWriter) writeJSON(v any) {
 }
 
 // relayFromServer copies the server's messages to the client, noting each
-// answer to a request that was waiting, and checking tool listings.
+// answer to a request that was waiting, and checking tool listings and the
+// server's requests of the client (serverreq.go).
 func (s *stdio) relayFromServer(r io.Reader) {
 	br := bufio.NewReader(r)
+	check := serverCheck{open: s.openGate, agentID: s.opts.AgentID, ownerID: s.opts.OwnerID, reservedKey: askKey, log: s.opts.Log}
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(bytes.TrimSpace(line)) > 0 && s.unreadableWhileListing(line) {
 			line = nil // dropped; every listing waiting was answered with an error
 		}
 		if len(bytes.TrimSpace(line)) > 0 {
+			method := ""
 			if id, ok := responseID(line); ok {
 				key, _ := listingID(json.RawMessage(id))
 				s.mu.Lock()
+				method = s.waiting[id]
 				delete(s.waiting, id)
 				_, isListing := s.listings[key]
 				delete(s.listings, key)
@@ -178,7 +183,13 @@ func (s *stdio) relayFromServer(r io.Reader) {
 					line = s.checkListing(json.RawMessage(id), line)
 				}
 			}
-			_ = s.client.writeLine(line)
+			out, keep, answer := check.message(context.Background(), bytes.TrimSpace(line), func(json.RawMessage) string { return method })
+			if answer != nil {
+				_ = s.writeServer(answer)
+			}
+			if keep {
+				_ = s.client.writeLine(out)
+			}
 		}
 		if err != nil {
 			return
@@ -317,16 +328,30 @@ func (s *stdio) handle(ctx context.Context, line []byte) (err error) {
 func (s *stdio) forward(msg message, line []byte) error {
 	if msg.method != "" && len(msg.id) > 0 {
 		s.mu.Lock()
-		s.waiting[string(msg.id)] = true
+		s.waiting[string(msg.id)] = msg.method
 		if key, ok := listingID(msg.id); ok && msg.method == methodToolsList && s.opts.OpenTools != nil {
 			s.listings[key] = msg.id
 		}
 		s.mu.Unlock()
 	}
+	return s.writeServer(line)
+}
+
+// writeServer sends one line to the server. The client's messages and our
+// answers to the server's refused requests take turns.
+func (s *stdio) writeServer(line []byte) error {
+	s.serverMu.Lock()
+	defer s.serverMu.Unlock()
 	if _, err := s.server.Write(append(append([]byte(nil), line...), '\n')); err != nil {
 		return fmt.Errorf("%w: %v", ErrServerExited, err)
 	}
 	return nil
+}
+
+// openGate opens the gate for one server request, as for a call.
+func (s *stdio) openGate(ctx context.Context) (*gate.Gate, func(), error) {
+	g, _, closeGate, err := s.opts.Open(ctx)
+	return g, closeGate, err
 }
 
 // handleCall runs one gated call past the gate, as the HTTP proxy does.

@@ -61,11 +61,33 @@ func TestStdioListingsThatCantBeChecked(t *testing.T) {
 		t.Errorf("a listing with a duplicate key: %s", got)
 	}
 
-	// Without pinning, listings pass as they came.
+	// Without pinning, a changed tool passes as it came. (A duplicate key
+	// still doesn't: no message from the server may hold one.)
 	f = newStdioFixture(t)
-	f.serverLists(listingLine(`{"name":"notes.read","description":"a","description":"b"}`))
+	f.serverLists(listingLine(notesTool))
 	f.send(`{"jsonrpc":"2.0","id":8,"method":"tools/list"}`)
-	if got := f.recv(); !strings.Contains(got, `"description":"b"`) {
+	f.recv()
+	f.serverLists(listingLine(notesTool2))
+	f.send(`{"jsonrpc":"2.0","id":9,"method":"tools/list"}`)
+	if got := f.recv(); !strings.Contains(got, "id_rsa") {
 		t.Errorf("with pinning off: %s", got)
+	}
+}
+
+func TestStdioServerRequests(t *testing.T) {
+	f := newStdioFixture(t)
+	f.send(stdioCall(1, "login", `{}`))
+	got := f.recv()
+	if strings.Contains(got, "elicitation/create") || !strings.Contains(got, `"id":1`) {
+		t.Fatalf("the client got: %s", got)
+	}
+	// The server was told no: the user declined, as far as it knows.
+	if !strings.Contains(got, `login got {\"id\":\"e1\",\"jsonrpc\":\"2.0\",\"result\":{\"action\":\"decline\"}}`) {
+		t.Errorf("the server's answer: %s", got)
+	}
+
+	f.send(stdioCall(2, "modern", `{}`))
+	if got := f.recv(); !strings.Contains(got, `"isError":true`) || !strings.Contains(got, `policy rule \"no-password-prompts\"`) || strings.Contains(got, "input_required") {
+		t.Errorf("an input_required asking for a password: %s", got)
 	}
 }

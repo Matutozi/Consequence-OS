@@ -461,6 +461,10 @@ func TestPageDescribesReads(t *testing.T) {
 	tests := []struct{ tool, want string }{
 		{"resource:file:///notes/a.md", "support-bot (owned by acme) wants to read file:///notes/a.md."},
 		{"prompt:incident-report", "support-bot (owned by acme) wants to get the prompt incident-report."},
+		{"server:elicitation", "support-bot (owned by acme) wants to let its MCP server ask the user for input."},
+		{"server:sampling", "support-bot (owned by acme) wants to let its MCP server have the client&#39;s model write a message."}, // as HTML escapes it
+		{"server:roots", "support-bot (owned by acme) wants to let its MCP server list the client&#39;s roots, the folders it may use."},
+		{"server:tasks/get", "support-bot (owned by acme) wants to let its MCP server send the client a tasks/get request."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.tool, func(t *testing.T) {

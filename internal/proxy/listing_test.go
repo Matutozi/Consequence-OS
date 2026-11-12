@@ -298,9 +298,10 @@ func TestPinningOff(t *testing.T) {
 	if f.proxy, err = New(f.opts); err != nil {
 		t.Fatal(err)
 	}
-	up.set(func(s *toolServer) { s.tools = []string{`{"name":"x","description":"a","description":"b"}`} })
+	listedTools(t, f)
+	up.set(func(s *toolServer) { s.tools = []string{notesTool2} })
 	rec := f.do("POST", listRequest, nil)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"description":"b"`) {
-		t.Errorf("with pinning off, the listing should pass as it came: %d %s", rec.Code, rec.Body)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "id_rsa") {
+		t.Errorf("with pinning off, a changed tool should pass as it came: %d %s", rec.Code, rec.Body)
 	}
 }

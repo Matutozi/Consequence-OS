@@ -62,6 +62,16 @@ rules:
     consequence: { arg: reversibility, op: ne, value: read }
     action: ask
 
+  # MCP servers wrapped with consequenced -stdio may ask the user for input mid-call (server:elicitation).
+  # It has no business asking for a password or key: a sign-in belongs on
+  # a sign-in page, which it can send the user to with an elicitation in
+  # mode url. Other server requests (server:sampling, server:roots) are
+  # allowed unless a rule says otherwise, and audited.
+  - name: no-secret-prompts
+    tool: server:elicitation
+    when: { arg: message, op: like, value: ["*password*", "*passphrase*", "*passcode*", "*api key*", "*secret key*", "*private key*", "*seed phrase*", "*recovery phrase*"], fold: true }
+    action: deny
+
   # Changes to files in the project go ahead (Claude Code may still ask, by
   # its own settings). Anywhere else, they ask.
   - name: edits-in-the-project
