@@ -57,7 +57,13 @@ Edit `~/.consequence/claude-code.yaml`. Rules are checked top to bottom and the 
 consequenced -hook claude-code -check
 ```
 
-It prints the rules and warns about risky ones. To try a change without being interrupted, put `mode: observe` at the top of the file. Every call then goes ahead, and the log records which ones the policy would have stopped. `consequenced -report` sums them up. Take it out once that looks right.
+It prints the rules and warns about risky ones. Then run the policy's tests, which `-init` wrote beside it:
+
+```bash
+consequenced -test ~/.consequence/claude-code.test.yaml
+```
+
+Each case is a tool call and the decision it should get. A case that fails shows what your change did. Change the case if you meant it, and add cases for the rules you add. To try a change without being interrupted, put `mode: observe` at the top of the file. Every call then goes ahead, and the log records which ones the policy would have stopped. `consequenced -report` sums them up. Take it out once that looks right.
 
 Two habits keep the policy safe:
 

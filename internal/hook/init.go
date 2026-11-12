@@ -14,6 +14,25 @@ import (
 //go:embed starter.yaml
 var starter string
 
+//go:embed starter.test.yaml
+var starterTests string
+
+// StarterTests returns the tests of the starter policy at policyPath, for
+// consequenced -test: they sit beside it, and name it relative to it.
+func StarterTests(policyPath string) string {
+	return strings.NewReplacer(
+		"{{POLICY_FILE}}", filepath.Base(policyPath),
+		"{{TEST_FILE}}", TestsPath(policyPath),
+		"{{CONSEQUENCE_DIR}}", resolveDir(filepath.Dir(policyPath)),
+	).Replace(starterTests)
+}
+
+// TestsPath is where the tests of the policy at policyPath go:
+// claude-code.yaml's are claude-code.test.yaml.
+func TestsPath(policyPath string) string {
+	return strings.TrimSuffix(policyPath, filepath.Ext(policyPath)) + ".test.yaml"
+}
+
 // Starter returns the starter policy for a config kept in dir: its state
 // lives in dir/state, and the rules keep the agent out of dir. The hook
 // resolves symlinks in paths before matching, so the rule names dir with
@@ -96,6 +115,12 @@ func writeStarter(path string, out io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(out, "Wrote the starter policy to %s.\n", path)
+	// Its tests, for when the policy is changed. Only beside a starter
+	// just written: someone else's policy wouldn't pass them.
+	tests := TestsPath(path)
+	if err := os.WriteFile(tests, []byte(StarterTests(path)), 0o600); err == nil {
+		fmt.Fprintf(out, "Wrote tests for it to %s; after changing the policy, run consequenced -test %s\n", tests, ShellQuote(tests))
+	}
 	return nil
 }
 

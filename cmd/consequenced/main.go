@@ -8,6 +8,7 @@
 //	consequenced -verify-audit                       check the stored audit log's hash chain
 //	consequenced -archive-audit FILE -before DATE    move the entries before DATE to FILE
 //	consequenced -verify-audit -archive FILE         check an archive file on its own
+//	consequenced -test cases.yaml                    check the policy's decisions against a table of calls
 //	consequenced -report [-since 7d]                 summarise what was stopped, or in observe mode would have been
 //	consequenced -tools                              list the pinned tool definitions
 //	consequenced -accept-tool notes.read             accept a changed tool definition, after asking on the terminal
@@ -43,6 +44,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/gate"
 	"github.com/matutozi/consequence-os/internal/hook"
 	"github.com/matutozi/consequence-os/internal/policy"
+	"github.com/matutozi/consequence-os/internal/policytest"
 	"github.com/matutozi/consequence-os/internal/proxy"
 	"github.com/matutozi/consequence-os/internal/receipt"
 	"github.com/matutozi/consequence-os/internal/store"
@@ -126,6 +128,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	reject := fs.Bool("reject", false, "with -approve: reject the call instead")
 	showLog := fs.Bool("log", false, "print recent decisions from the audit log and exit")
 	logCount := fs.Int("n", 20, "with -log: how many decisions to print")
+	testFile := fs.String("test", "", "run the policy tests in this file: calls and the decision each should get; fails if any doesn't")
 	report := fs.Bool("report", false, "summarise the audit log: what went ahead, and which rules stopped calls, or in observe mode would have")
 	sinceFlag := fs.String("since", "7d", "with -report: how far back, as days (7d) or a duration (36h)")
 	listTools := fs.Bool("tools", false, "list the pinned tool definitions, and rules whose arguments their schemas don't have, and exit")
@@ -162,6 +165,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			}
 		}
 		return runArchiveAudit(ctx, out, cfg, isLocal, *archiveAudit, before)
+	}
+	if *testFile != "" {
+		return runPolicyTests(ctx, out, *testFile, *configPath, configSet)
 	}
 	if *report {
 		since, err := parseSince(*sinceFlag)
@@ -925,6 +931,43 @@ func printSummary(out io.Writer, cfg *config.Config) {
 	}
 
 	printPolicy(out, cfg)
+}
+
+// runPolicyTests runs consequenced -test. The policy is -config, else the
+// test file's config:, else the default -tools uses. Only the policy is
+// read, so it needs none of the server's secrets.
+func runPolicyTests(ctx context.Context, out io.Writer, file, configPath string, configSet bool) error {
+	f, err := policytest.Read(file)
+	if err != nil {
+		return err
+	}
+	path := f.Config
+	if configSet || path == "" {
+		path = configPath
+		if !configSet {
+			if _, err := os.Stat(path); err != nil {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return err
+				}
+				path = filepath.Join(home, ".consequence", "claude-code.yaml")
+			}
+		}
+	}
+	cfg, err := config.LoadPolicy(path)
+	if err != nil {
+		return err
+	}
+	rep, err := policytest.Run(ctx, cfg, f, time.Now())
+	if err != nil {
+		return fmt.Errorf("%s: %w", file, err)
+	}
+	fmt.Fprintf(out, "testing %s against %s\n", file, path)
+	policytest.Print(out, rep)
+	if rep.Failed() {
+		return errors.New("policy tests failed")
+	}
+	return nil
 }
 
 // describeMode says what the mode means.

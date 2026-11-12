@@ -18,7 +18,7 @@ export CONSEQUENCE_SIGNING_KEY_MLDSA87 ?= d981o8Ahw7SPWkniT-C-PSaH-CDeOSX9aZCCf4
 # and drop throwaway databases.
 TEST_DATABASE_URL ?= postgres://postgres:test@127.0.0.1:55432/postgres
 
-.PHONY: run check mock demo demo-approval demo-receipts demo-personal demo-rug-pull test test-postgres bench lint dist env up down logs
+.PHONY: run check mock demo demo-approval demo-receipts demo-personal demo-rug-pull test test-policy test-postgres bench lint dist env up down logs
 
 run:
 	go run ./cmd/consequenced -config $(CONFIG)
@@ -52,6 +52,10 @@ demo-rug-pull:
 
 test:
 	go test ./...
+
+# The shipped config's policy tests; see "Testing a policy" in the README.
+test-policy:
+	go run ./cmd/consequenced -test consequence.test.yaml
 
 test-postgres:
 	CONSEQUENCE_TEST_DATABASE_URL=$(TEST_DATABASE_URL) go test ./internal/store/
