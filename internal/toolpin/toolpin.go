@@ -94,8 +94,11 @@ type Options struct {
 	// AllowUnnamed lets calls through with arguments the pinned schema
 	// doesn't name. Off, they're refused.
 	AllowUnnamed bool
-	Log          *slog.Logger
-	Now          func() time.Time // nil means time.Now
+	// Observe is observe mode: a changed tool is recorded as usual but
+	// stays in the listing.
+	Observe bool
+	Log     *slog.Logger
+	Now     func() time.Time // nil means time.Now
 }
 
 // Service pins one server's tools. It is safe for concurrent use.
@@ -104,6 +107,7 @@ type Service struct {
 	audit        Auditor
 	server       string
 	allowUnnamed bool
+	observeMode  bool
 	log          *slog.Logger
 	now          func() time.Time
 }
@@ -113,7 +117,7 @@ func New(opts Options) (*Service, error) {
 	if opts.Repo == nil || opts.Audit == nil || opts.Log == nil || opts.Server == "" {
 		return nil, errors.New("toolpin: Repo, Audit, Log and Server are required")
 	}
-	s := &Service{repo: opts.Repo, audit: opts.Audit, server: opts.Server, allowUnnamed: opts.AllowUnnamed, log: opts.Log, now: opts.Now}
+	s := &Service{repo: opts.Repo, audit: opts.Audit, server: opts.Server, allowUnnamed: opts.AllowUnnamed, observeMode: opts.Observe, log: opts.Log, now: opts.Now}
 	if s.now == nil {
 		s.now = time.Now
 	}
@@ -251,7 +255,7 @@ func (s *Service) ObserveList(ctx context.Context, by Lister, result json.RawMes
 			}
 			pins[d.name] = p
 		}
-		if !p.Changed() {
+		if !p.Changed() || s.observeMode {
 			keep = append(keep, tools[i])
 		}
 	}

@@ -54,8 +54,11 @@ type Options struct {
 	// their way to the agent, and calls against what was accepted. nil
 	// turns that off.
 	Tools *toolpin.Service
-	Log   *slog.Logger
-	Now   func() time.Time // nil means time.Now; tests pass a fixed clock
+	// Observe is observe mode: nothing is stopped by the policy; see
+	// gate.Options.Observe.
+	Observe bool
+	Log     *slog.Logger
+	Now     func() time.Time // nil means time.Now; tests pass a fixed clock
 }
 
 // Proxy implements http.Handler for the /mcp endpoint. It is the HTTP
@@ -90,7 +93,7 @@ func New(opts Options) (*Proxy, error) {
 	}
 	g, err := gate.New(gate.Options{
 		Engine: opts.Engine, Resolver: opts.Resolver, Store: opts.Store,
-		Approvals: opts.Approvals, Tools: opts.Tools, Log: opts.Log, Now: opts.Now,
+		Approvals: opts.Approvals, Tools: opts.Tools, Observe: opts.Observe, Log: opts.Log, Now: opts.Now,
 	})
 	if err != nil {
 		return nil, err
@@ -265,10 +268,22 @@ func (p *Proxy) fail(w http.ResponseWriter, msg message, err error) {
 // forwardAllowed forwards an allowed or approved call. Tool calls carry a
 // receipt; reads don't, because receipts are for actions and receivers
 // check only tools/call.
+//
+// In observe mode, a tool call the policy would have stopped goes without
+// a receipt: a receipt says the policy allowed the call, and it didn't. A
+// receiver that checks receipts refuses it, as it should.
 func (p *Proxy) forwardAllowed(w http.ResponseWriter, r *http.Request, msg message, call toolCall, res *gate.Result, body []byte) {
-	if call.isTool() {
+	if call.isTool() && !res.Observed {
 		p.forwardWithReceipt(w, r, msg, res, body)
 		return
+	}
+	if call.isTool() {
+		// Only ConsequenceOS attaches receipts, so drop any the agent sent.
+		var err error
+		if body, err = stripReceipt(body); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse(msg.id, codeInvalidParams, "params._meta must be an object"))
+			return
+		}
 	}
 	if err := res.Admit(r.Context(), ""); err != nil {
 		p.fail(w, msg, err)

@@ -57,7 +57,9 @@ Edit `~/.consequence/claude-code.yaml`. Rules are checked top to bottom and the 
 consequenced -hook claude-code -check
 ```
 
-It prints the rules and warns about risky ones. Two habits keep the policy safe:
+It prints the rules and warns about risky ones. To try a change without being interrupted, put `mode: observe` at the top of the file. Every call then goes ahead, and the log records which ones the policy would have stopped. `consequenced -report` sums them up. Take it out once that looks right.
+
+Two habits keep the policy safe:
 
 - **Loosen by allowing, not by deleting deny rules.** To let the agent run your tests, add `"go test ./..."` to the commands in `commands-that-only-look`, rather than removing `other-commands`.
 - **Keep `compound: false` on shell allow rules.** Without it, `go test ./...; rm -rf ~` passes as `go test ./...`. `-check` warns if it's missing.

@@ -53,6 +53,7 @@ func toolService(cfg *config.Config, st store.Store, server string, log *slog.Lo
 	return toolpin.New(toolpin.Options{
 		Repo: st, Audit: st, Server: server, Log: log,
 		AllowUnnamed: cfg.ToolPins.UnnamedArguments == config.UnnamedAllow,
+		Observe:      cfg.Observe(),
 	})
 }
 

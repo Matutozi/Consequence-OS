@@ -44,8 +44,15 @@ type Options struct {
 	// whose definition changed asks. nil means nothing is pinned, as for
 	// the Claude Code hook, whose tools come from no listing.
 	Tools *toolpin.Service
-	Log   *slog.Logger
-	Now   func() time.Time // nil means time.Now; tests pass a fixed clock
+	// Observe is observe mode (shadow mode): calls are decided and
+	// audited as usual, but none is stopped. A call the policy would have
+	// denied, held or refused comes back Allowed with Observed set, and
+	// is recorded as observed, with what would have happened. No approval
+	// is opened. Checks that keep a request unambiguous, and failures of
+	// what the decision depends on, still stop calls: they're not policy.
+	Observe bool
+	Log     *slog.Logger
+	Now     func() time.Time // nil means time.Now; tests pass a fixed clock
 }
 
 // Gate decides calls. It is safe for concurrent use.
@@ -55,6 +62,7 @@ type Gate struct {
 	store     store.Store
 	approvals *approval.Service
 	tools     *toolpin.Service
+	observe   bool
 	log       *slog.Logger
 	now       func() time.Time
 	limits    keyedLocks // serializes calls covered by limit rules; see locks.go
@@ -68,6 +76,7 @@ func New(opts Options) (*Gate, error) {
 		store:     opts.Store,
 		approvals: opts.Approvals,
 		tools:     opts.Tools,
+		observe:   opts.Observe,
 		log:       opts.Log,
 		now:       opts.Now,
 	}
@@ -135,6 +144,12 @@ type Result struct {
 	// other than the accepted one, so the call asks (or a deny rule still
 	// denies it) until a person accepts the change.
 	ToolChanged bool
+	// Observed means observe mode let through a call the policy would
+	// have stopped; Would says how it would have been stopped, e.g.
+	// "would have been blocked". The adapter forwards it without a
+	// receipt: a receipt says the policy allowed the call, and it didn't.
+	Observed bool
+	Would    string
 
 	g       *Gate
 	call    policy.Call
@@ -172,20 +187,21 @@ func (g *Gate) Decide(ctx context.Context, req Request) (*Result, error) {
 	if err != nil { // the adapter has already parsed them, but never decide on unhashed arguments
 		return nil, &Error{What: "arguments could not be hashed", BadArguments: true, Err: err}
 	}
-	toolChanged := false
+	toolChanged, invalid := false, ""
 	if g.tools != nil && !policy.IsRead(req.Name) {
 		st, problem, err := g.tools.Check(ctx, req.Name, req.Args)
 		if err != nil {
 			g.log.Error("tool pin lookup failed", "tool", req.Name, "err", err)
 			return nil, &Error{What: "tool definitions unavailable", Err: err}
 		}
-		if problem != "" {
+		if problem != "" && !g.observe {
 			entry.Tool, entry.ParamsHash, entry.Summary = req.Name, hash, Summarize(req.Name, req.Args)
 			res := &Result{g: g, release: func() {}, Reason: problem}
 			res.Entry = entry
 			res.finish(ctx, Invalid, audit.OutcomeRejected, problem)
 			return res, nil
 		}
+		invalid = problem // in observe mode, recorded below and not stopped
 		toolChanged = st == toolpin.Changed
 	}
 	// Assess before taking any lock: a resolver may be slow (a map lookup),
@@ -234,6 +250,12 @@ func (g *Gate) Decide(ctx context.Context, req Request) (*Result, error) {
 	entry.Rule = decision.Rule
 	res.Decision, res.Entry = decision, entry
 
+	if g.observe {
+		if would := g.would(decision.Action, invalid); would != "" {
+			res.Verdict, res.Observed, res.Would = Allowed, true, would
+			return res, nil
+		}
+	}
 	switch decision.Action {
 	case policy.ActionAllow:
 		res.Verdict = Allowed
@@ -252,6 +274,22 @@ func (g *Gate) Decide(ctx context.Context, req Request) (*Result, error) {
 		}
 		return res, nil
 	}
+}
+
+// would says how a call would have been stopped, in observe mode, or ""
+// when it wouldn't have been.
+func (g *Gate) would(action policy.Action, invalid string) string {
+	switch {
+	case invalid != "":
+		return "would have been refused: " + invalid
+	case action == policy.ActionDeny:
+		return "would have been blocked"
+	case action == policy.ActionAsk && g.approvals == nil:
+		return "would have asked the user"
+	case action == policy.ActionAsk:
+		return "would have been held for approval"
+	}
+	return ""
 }
 
 // ask opens or checks the approval for a call the policy holds for a human.
@@ -317,6 +355,14 @@ func (r *Result) Admit(ctx context.Context, receiptID string) error {
 	outcome := audit.OutcomeForwarded
 	switch r.Verdict {
 	case Allowed:
+		if r.Observed {
+			outcome = audit.OutcomeObserved
+			detail := "observe mode: " + r.Would
+			if r.Entry.Detail != "" {
+				detail += "; " + r.Entry.Detail // the adapter's own note
+			}
+			r.Entry.Detail = detail
+		}
 	case AskUser:
 		outcome = audit.OutcomeAskedUser
 	default:

@@ -264,3 +264,27 @@ func TestCheckArguments(t *testing.T) {
 		t.Errorf("AllowUnnamed still refused: %s", problem)
 	}
 }
+
+// In observe mode a changed tool stays in the listing, and the change is
+// still recorded, so a later switch to enforce knows it.
+func TestObserveModeKeepsChangedTools(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	s, err := toolpin.New(toolpin.Options{Repo: st, Audit: st, Server: server, Log: discard, Observe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ObserveList(ctx, toolpin.Lister{}, list(readNote)); err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.ObserveList(ctx, toolpin.Lister{}, list(readNote2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := names(t, out); len(got) != 1 {
+		t.Errorf("a changed tool was left out in observe mode: %s", out)
+	}
+	if st, _, _ := s.Check(ctx, "notes.read", nil); st != toolpin.Changed {
+		t.Errorf("the change wasn't recorded: %v", st)
+	}
+}

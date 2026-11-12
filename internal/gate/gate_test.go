@@ -52,6 +52,7 @@ type options struct {
 	maxPending int
 	local      bool // no approval service, as in the hook mode
 	tools      bool // pin tool definitions, as the proxy does
+	observe    bool // observe mode
 }
 
 func defaultRules() []policy.Rule {
@@ -88,6 +89,7 @@ func newFixture(t *testing.T, o options) fixture {
 	if o.local {
 		opts.Approvals = nil
 	}
+	opts.Observe = o.observe
 	if o.tools {
 		if opts.Tools, err = toolpin.New(toolpin.Options{Repo: o.store, Audit: o.store, Server: pinServer, Log: opts.Log, Now: now}); err != nil {
 			t.Fatal(err)

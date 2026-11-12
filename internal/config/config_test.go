@@ -599,3 +599,24 @@ func TestPreviousKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestMode(t *testing.T) {
+	env := baseEnv(map[string]string{"KEY_SUPPORT": "k"})
+	cfg, err := Parse([]byte(validYAML), env)
+	if err != nil || cfg.Mode != ModeEnforce || cfg.Observe() || len(cfg.LocalWarnings()) != 0 {
+		t.Fatalf("default: %q, %v", cfg.Mode, err)
+	}
+	cfg, err = Parse([]byte("mode: observe\n"+validYAML), env)
+	if err != nil || !cfg.Observe() || len(cfg.LocalWarnings()) != 1 || !strings.Contains(strings.Join(cfg.Warnings(), "\n"), "mode is observe") {
+		t.Errorf("observe: %v, %v", cfg, err)
+	}
+	if _, err := Parse([]byte("mode: shadow\n"+validYAML), env); err == nil || !strings.Contains(err.Error(), "must be enforce or observe") {
+		t.Errorf("mode: shadow: %v", err)
+	}
+	if _, err := ParseLocal([]byte("mode: Observe\nstate_dir: /tmp/x\n"), env); err == nil {
+		t.Error("ParseLocal took mode: Observe")
+	}
+	if cfg, err := ParseLocal([]byte("mode: observe\nstate_dir: /tmp/x\n"), env); err != nil || !cfg.Observe() {
+		t.Errorf("ParseLocal observe: %v", err)
+	}
+}

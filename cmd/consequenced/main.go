@@ -8,6 +8,7 @@
 //	consequenced -verify-audit                       check the stored audit log's hash chain
 //	consequenced -archive-audit FILE -before DATE    move the entries before DATE to FILE
 //	consequenced -verify-audit -archive FILE         check an archive file on its own
+//	consequenced -report [-since 7d]                 summarise what was stopped, or in observe mode would have been
 //	consequenced -tools                              list the pinned tool definitions
 //	consequenced -accept-tool notes.read             accept a changed tool definition, after asking on the terminal
 //	consequenced -genkeys                            print fresh receipt signing keys
@@ -125,6 +126,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	reject := fs.Bool("reject", false, "with -approve: reject the call instead")
 	showLog := fs.Bool("log", false, "print recent decisions from the audit log and exit")
 	logCount := fs.Int("n", 20, "with -log: how many decisions to print")
+	report := fs.Bool("report", false, "summarise the audit log: what went ahead, and which rules stopped calls, or in observe mode would have")
+	sinceFlag := fs.String("since", "7d", "with -report: how far back, as days (7d) or a duration (36h)")
 	listTools := fs.Bool("tools", false, "list the pinned tool definitions, and rules whose arguments their schemas don't have, and exit")
 	acceptTool := fs.String("accept-tool", "", "accept the changed definition of this tool, asking you on the terminal first")
 	serverName := fs.String("server", "", "with -tools or -accept-tool: only this server's tools, named as -tools shows it")
@@ -159,6 +162,17 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			}
 		}
 		return runArchiveAudit(ctx, out, cfg, isLocal, *archiveAudit, before)
+	}
+	if *report {
+		since, err := parseSince(*sinceFlag)
+		if err != nil {
+			return err
+		}
+		cfg, _, err := loadAnyConfig(*configPath, configSet)
+		if err != nil {
+			return err
+		}
+		return printReport(ctx, out, cfg, since, time.Now())
 	}
 	if *listTools || *acceptTool != "" {
 		cfg, isLocal, err := loadAnyConfig(*configPath, configSet)
@@ -278,10 +292,10 @@ func printHookSummary(out io.Writer, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "config OK for the Claude Code hook\n  state_dir:         %s\n  agent:             %s (owner %s)\n",
-		cfg.StateDir, cfg.LocalAgent.ID, cfg.LocalAgent.OwnerID)
+	fmt.Fprintf(out, "config OK for the Claude Code hook\n  mode:              %s\n  state_dir:         %s\n  agent:             %s (owner %s)\n",
+		describeMode(cfg), cfg.StateDir, cfg.LocalAgent.ID, cfg.LocalAgent.OwnerID)
 	printPolicy(out, cfg)
-	printWarningList(out, append(engine.Warnings(), hook.Warnings(cfg.Rules)...))
+	printWarningList(out, append(append(engine.Warnings(), hook.Warnings(cfg.Rules)...), cfg.LocalWarnings()...))
 	return nil
 }
 
@@ -346,6 +360,9 @@ func runStdio(ctx context.Context, cfg *config.Config, command []string, approve
 	// as its log.
 	errOut := &lockedWriter{w: stderr}
 	log := slog.New(slog.NewTextHandler(errOut, nil))
+	for _, w := range cfg.LocalWarnings() {
+		log.Warn("config: " + w)
+	}
 	for _, w := range engine.Warnings() {
 		log.Warn("policy: " + w)
 	}
@@ -404,7 +421,7 @@ func localGate(cfg *config.Config, engine *policy.Engine, log *slog.Logger, serv
 			return nil, nil, nil, err
 		}
 		svc := localApprovals(cfg, st, log)
-		g, err := gate.New(gate.Options{Engine: engine, Store: st, Approvals: svc, Tools: tools, Log: log})
+		g, err := gate.New(gate.Options{Engine: engine, Store: st, Approvals: svc, Tools: tools, Observe: cfg.Observe(), Log: log})
 		if err != nil {
 			st.Close()
 			return nil, nil, nil, err
@@ -581,6 +598,7 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 		Receiver:       cfg.UpstreamReceiver,
 		UpstreamAuth:   cfg.UpstreamAuth,
 		Tools:          tools,
+		Observe:        cfg.Observe(),
 		Log:            log,
 	})
 	if err != nil {
@@ -868,9 +886,9 @@ func printSummary(out io.Writer, cfg *config.Config) {
 	case cfg.StateDir != "":
 		storage = "files in " + cfg.StateDir
 	}
-	fmt.Fprintf(out, "config OK\n  listen:            %s\n  public URL:        %s\n  upstream:          %s\n"+
+	fmt.Fprintf(out, "config OK\n  mode:              %s\n  listen:            %s\n  public URL:        %s\n  upstream:          %s\n"+
 		"  approval timeout:  %s\n  approval validity: %s\n  receipt validity:  %s\n  admin token from:  $%s\n  storage:           %s\n",
-		cfg.Listen, cfg.PublicURL, cfg.Upstream, approval.HumanDuration(cfg.ApprovalTimeout),
+		describeMode(cfg), cfg.Listen, cfg.PublicURL, cfg.Upstream, approval.HumanDuration(cfg.ApprovalTimeout),
 		approval.HumanDuration(cfg.ApprovalValidity), approval.HumanDuration(cfg.Receipts.TTL), cfg.AdminTokenEnv, storage)
 
 	email := "off (approver links go to the server log)"
@@ -907,6 +925,14 @@ func printSummary(out io.Writer, cfg *config.Config) {
 	}
 
 	printPolicy(out, cfg)
+}
+
+// describeMode says what the mode means.
+func describeMode(cfg *config.Config) string {
+	if cfg.Observe() {
+		return "observe: calls are decided and audited, but none is stopped"
+	}
+	return "enforce"
 }
 
 // printPolicy prints the tools map, the rules and the default.

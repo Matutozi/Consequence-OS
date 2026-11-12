@@ -36,6 +36,11 @@ const (
 	OutcomeToolChanged  Outcome = "tool_changed"  // listed with a definition other than its pin
 	OutcomeToolAccepted Outcome = "tool_accepted" // a person accepted the change
 
+	// OutcomeObserved: in observe mode, a call the policy would have
+	// stopped went ahead. Decision and Rule say what the policy decided,
+	// and Detail how the call would have been stopped.
+	OutcomeObserved Outcome = "observed"
+
 	// OutcomeArchived: older entries were written to an archive file and
 	// deleted from the log. Detail names the file and the entries.
 	OutcomeArchived Outcome = "archived"
