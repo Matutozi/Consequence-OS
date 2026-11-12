@@ -334,6 +334,27 @@ consequenced -verify-audit -audit-head head-2026-11-04.json
 
 A head is signed with the same two keys as receipts, under its own type, so it can't pass as a receipt. Anyone with the public keys can check one, using `verify.VerifyAuditHead` in Go. `-verify-audit` exits with status 1 if anything was changed, so you can run it from cron or CI and alert on failure.
 
+### Archiving old entries
+
+The log only grows, and retention rules often say records must go after a while. Deleting old entries would break the chain at the first one kept, so archive them instead:
+
+```bash
+# Move every entry from before 2026 into a file, then delete them from the log.
+consequenced -archive-audit audit-2025.jsonl -before 2026-01-01
+
+# Check the file on its own, now or years later.
+consequenced -verify-audit -archive audit-2025.jsonl
+```
+
+- **The log keeps an anchor:** the last archived entry's place and hash, with a head signed for them. `-verify-audit` and `GET /v1/audit/verify` check the chain from the anchor, and the anchor's signature, so the head vouches for everything that came before it. An entry written next links to the anchor, even when every entry was archived.
+- **The file** is JSON lines: a header naming where its entries start (the previous archive's anchor, if any) and where they end (a signed head), then the entries. `-verify-audit -archive` checks that they chain from one end to the other, that none were removed, and both signatures.
+- **Safe order:** archiving refuses a log whose chain is broken, since it would delete the evidence. The file is written beside its final name, checked, and put in place without overwriting anything. Only then are the entries deleted. The archiving itself goes in the log as an `archived` entry, so the gap is explained.
+- **Gone from disk:** the file store rewrites its journal right after, so the archived entries leave the disk as well. Postgres frees their space at its next vacuum.
+- **Where it runs:** with Postgres it works while the server runs. A server using `state_dir` holds it while running, so stop the server first. The local modes (the Claude Code hook, `-stdio`) archive too, but they have no signing keys, so their anchors and archive files aren't signed.
+- **What it doesn't delete:** approvals keep the arguments they showed the approver, and are kept as before.
+
+Archive files are evidence: keep them where the database admin can't change them, as with saved heads. A saved head from before the anchor is checked against the archive that holds it.
+
 ## Receipts
 
 A receipt is a JWS in **General JSON Serialization** over an **RFC 8785 canonical** payload. It carries two signatures, **Ed25519** and post-quantum **ML-DSA-87**, and both must verify. This follows how the [IETF Agent Permission Receipts draft](https://datatracker.ietf.org/doc/draft-izmaylov-agent-permission-receipts/) encodes its records. The draft defines no server-issued receipt, so the payload fields are ConsequenceOS's own:
@@ -614,7 +635,8 @@ This is an early MVP. Built:
 - a file store, which keeps state on one machine across restarts with no database;
 - a Claude Code hook, which applies the policy to Claude Code's built-in tools;
 - pinned tool definitions: a changed tool is hidden from the model and asks until accepted, and arguments its schema doesn't name are refused;
-- signing key rotation, with old keys kept for saved audit heads, and offline receivers that pick up new keys by themselves.
+- signing key rotation, with old keys kept for saved audit heads, and offline receivers that pick up new keys by themselves;
+- archiving old audit entries to a file that can be checked on its own, without breaking the chain.
 
 Not yet:
 - passkey-signed approvals.

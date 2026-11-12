@@ -6,6 +6,8 @@
 //	consequenced -tool payments.refund -args '{...}' show the assessment and policy decision for one call
 //	             [-at 2026-11-02T22:00:00Z]          ...as if made at that time
 //	consequenced -verify-audit                       check the stored audit log's hash chain
+//	consequenced -archive-audit FILE -before DATE    move the entries before DATE to FILE
+//	consequenced -verify-audit -archive FILE         check an archive file on its own
 //	consequenced -tools                              list the pinned tool definitions
 //	consequenced -accept-tool notes.read             accept a changed tool definition, after asking on the terminal
 //	consequenced -genkeys                            print fresh receipt signing keys
@@ -111,6 +113,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	verifyAudit := fs.Bool("verify-audit", false, "check the stored audit log's hash chain and exit; fails if it was tampered with")
 	auditHead := fs.String("audit-head", "", "with -verify-audit: a signed head saved from GET /v1/audit/head; the log must still contain it")
+	archiveAudit := fs.String("archive-audit", "", "write the audit entries from before -before to this new file, then delete them from the log")
+	beforeFlag := fs.String("before", "", "with -archive-audit: a date (2026-01-01, midnight UTC) or time; the entries before it are archived")
+	archiveFile := fs.String("archive", "", "with -verify-audit: check this archive file, written by -archive-audit, on its own")
 	hookName := fs.String("hook", "", "run as a hook for this agent (claude-code): read one tool call on stdin, answer on stdout, exit 2 to block")
 	initName := fs.String("init", "", "set up the hook for this agent (claude-code): write a starter policy and add the hook to its settings")
 	global := fs.Bool("global", false, "with -init: add the hook to ~/.claude/settings.json, for every project, instead of this project's .claude/settings.local.json")
@@ -139,8 +144,24 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if *initName != "" {
 		return runInit(*initName, *configPath, *global, *yes, out)
 	}
+	if *archiveAudit != "" || (*verifyAudit && *archiveFile != "") {
+		cfg, isLocal, err := loadAnyConfig(*configPath, configSet)
+		if err != nil {
+			return err
+		}
+		if *archiveAudit == "" {
+			return verifyArchiveFile(out, cfg, isLocal, *archiveFile)
+		}
+		var before time.Time
+		if *beforeFlag != "" {
+			if before, err = parseBefore(*beforeFlag); err != nil {
+				return err
+			}
+		}
+		return runArchiveAudit(ctx, out, cfg, isLocal, *archiveAudit, before)
+	}
 	if *listTools || *acceptTool != "" {
-		cfg, isLocal, err := loadToolsConfig(*configPath, configSet)
+		cfg, isLocal, err := loadAnyConfig(*configPath, configSet)
 		if err != nil {
 			return err
 		}
@@ -573,7 +594,7 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 	mux.HandleFunc("GET /approvals/{id}", pages.Page)
 	mux.HandleFunc("POST /approvals/{id}/decide", pages.Decide)
 	mux.Handle("GET /v1/audit", audit.Handler(st, cfg.AdminToken, log))
-	mux.Handle("GET /v1/audit/verify", audit.VerifyHandler(st, cfg.AdminToken, log))
+	mux.Handle("GET /v1/audit/verify", audit.VerifyHandler(st, headChecker(keys), cfg.AdminToken, log))
 	signHead := func(seq int64, hash string) ([]byte, error) {
 		return keys.SignAuditHead(cfg.PublicURL, seq, hash, time.Now())
 	}
@@ -623,6 +644,13 @@ func checkAuditChain(ctx context.Context, out io.Writer, cfg *config.Config, hea
 		return errors.New("-verify-audit needs database_url_env or state_dir: the in-memory store keeps no log between runs")
 	}
 	var v audit.ChainVerifier
+	if cfg.Receipts.Ed25519Key != "" { // the server's config; the local modes have no keys
+		keys, err := loadKeys(cfg)
+		if err != nil {
+			return err
+		}
+		v.CheckHead = headChecker(keys)
+	}
 	if headFile != "" {
 		head, err := loadSavedHead(cfg, headFile)
 		if err != nil {
@@ -649,6 +677,9 @@ func checkAuditChain(ctx context.Context, out io.Writer, cfg *config.Config, hea
 		return errors.New("the audit log has been changed")
 	}
 	fmt.Fprintf(out, "audit chain intact: %d entries checked", r.Checked)
+	if r.ArchivedThrough > 0 {
+		fmt.Fprintf(out, ", after entry %d, where the archived entries end (anchor %s)", r.ArchivedThrough, r.Anchor)
+	}
 	if r.Unhashed > 0 {
 		fmt.Fprintf(out, ", %d older entries from before chaining", r.Unhashed)
 	}
@@ -758,6 +789,19 @@ func openStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (store
 	}
 	log.Info("using Postgres store; migrations are up to date")
 	return pg, nil
+}
+
+// headChecker checks signed audit heads with every key the server has
+// signed with, for the anchor the log starts from after archiving.
+func headChecker(keys *receipt.Keys) audit.HeadChecker {
+	set := keys.HeadKeys()
+	return func(signed []byte) (int64, string, error) {
+		h, err := verify.VerifyAuditHead(signed, set)
+		if err != nil {
+			return 0, "", err
+		}
+		return h.Seq, h.Hash, nil
+	}
 }
 
 // loadKeys loads the signing keys, and the previous ones after a rotation.

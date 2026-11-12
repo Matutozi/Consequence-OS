@@ -52,12 +52,15 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // VerifyHandler serves GET /v1/audit/verify: it checks the whole hash chain
 // and answers with a ChainReport. It needs the admin token.
-func VerifyHandler(w Walker, adminToken string, log *slog.Logger) http.Handler {
+//
+// check checks the signed head of the anchor the log starts from after
+// archiving, with the server's keys.
+func VerifyHandler(w Walker, check HeadChecker, adminToken string, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if !requireAdmin(rw, r, adminToken) {
 			return
 		}
-		report, err := VerifyChain(r.Context(), w)
+		report, err := VerifyChainWith(r.Context(), w, &ChainVerifier{CheckHead: check})
 		if err != nil {
 			log.Error("verify audit chain", "err", err)
 			writeJSON(rw, http.StatusInternalServerError, map[string]string{"error": "could not read the audit log"})
@@ -91,6 +94,20 @@ func HeadHandler(src HeadSource, sign HeadSigner, adminToken string, log *slog.L
 			log.Error("read audit head", "err", err)
 			writeJSON(rw, http.StatusInternalServerError, map[string]string{"error": "could not read the audit log"})
 			return
+		}
+		if !ok {
+			// Every entry was archived: the chain ends at the anchor.
+			if anchors, isSource := src.(AnchorSource); isSource {
+				a, archived, err := anchors.AuditAnchor(r.Context())
+				if err != nil {
+					log.Error("read audit anchor", "err", err)
+					writeJSON(rw, http.StatusInternalServerError, map[string]string{"error": "could not read the audit log"})
+					return
+				}
+				if archived {
+					last, ok = Entry{Seq: a.Seq, Hash: a.Hash}, true
+				}
+			}
 		}
 		if !ok || last.Hash == "" {
 			writeJSON(rw, http.StatusNotFound, map[string]string{"error": "the audit log has no chained entries yet"})

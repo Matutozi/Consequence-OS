@@ -125,7 +125,10 @@ func (p *Postgres) AppendAudit(ctx context.Context, e audit.Entry) (audit.Entry,
 			return err
 		}
 		var prev string
-		err := tx.QueryRow(ctx, `SELECT hash FROM audit_entries ORDER BY seq DESC LIMIT 1`).Scan(&prev)
+		// The newest entry's hash, or the anchor's once every entry was archived.
+		err := tx.QueryRow(ctx, `SELECT hash FROM (
+				(SELECT hash, 1 AS o, seq FROM audit_entries ORDER BY seq DESC LIMIT 1)
+				UNION ALL (SELECT hash, 2, seq FROM audit_anchor)) last ORDER BY o LIMIT 1`).Scan(&prev)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
@@ -179,6 +182,68 @@ func (p *Postgres) ForEachAudit(ctx context.Context, fn func(audit.Entry) error)
 		}
 	}
 	return rows.Err()
+}
+
+// AuditAnchor implements audit.AnchorSource.
+func (p *Postgres) AuditAnchor(ctx context.Context) (audit.Anchor, bool, error) {
+	var a audit.Anchor
+	var head string
+	err := p.pool.QueryRow(ctx, `SELECT seq, hash, head, archived_at FROM audit_anchor`).Scan(&a.Seq, &a.Hash, &head, &a.At)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return audit.Anchor{}, false, nil
+	}
+	if err != nil {
+		return audit.Anchor{}, false, fmt.Errorf("postgres: audit anchor: %w", err)
+	}
+	a.At = a.At.UTC()
+	if head != "" {
+		a.Head = json.RawMessage(head)
+	}
+	return a, true, nil
+}
+
+// ArchiveAudit implements Store, under the audit chain's lock, so no entry
+// is appended between the check and the delete. Postgres frees the
+// deleted rows' space at its next vacuum.
+func (p *Postgres) ArchiveAudit(ctx context.Context, a audit.Anchor) (int64, error) {
+	var n int64
+	err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, auditChainLock); err != nil {
+			return err
+		}
+		var anchored int64
+		err := tx.QueryRow(ctx, `SELECT seq FROM audit_anchor`).Scan(&anchored)
+		switch {
+		case err != nil && !errors.Is(err, pgx.ErrNoRows):
+			return err
+		case err == nil && a.Seq <= anchored:
+			return fmt.Errorf("entry %d is already archived", a.Seq)
+		}
+		var hash string
+		err = tx.QueryRow(ctx, `SELECT hash FROM audit_entries WHERE seq = $1`, a.Seq).Scan(&hash)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("there is no entry %d to archive up to", a.Seq)
+		}
+		if err != nil {
+			return err
+		}
+		if hash == "" || hash != a.Hash {
+			return fmt.Errorf("entry %d's hash isn't %s", a.Seq, a.Hash)
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM audit_entries WHERE seq <= $1`, a.Seq)
+		if err != nil {
+			return err
+		}
+		n = tag.RowsAffected()
+		_, err = tx.Exec(ctx, `INSERT INTO audit_anchor (seq, hash, head, archived_at) VALUES ($1, $2, $3, $4)
+			ON CONFLICT (only_row) DO UPDATE SET seq = $1, hash = $2, head = $3, archived_at = $4`,
+			a.Seq, a.Hash, string(a.Head), a.At)
+		return err
+	})
+	if err != nil {
+		return 0, fmt.Errorf("postgres: archive audit: %w", err)
+	}
+	return n, nil
 }
 
 // LastAudit implements Store.

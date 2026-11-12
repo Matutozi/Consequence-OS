@@ -261,6 +261,41 @@ func (f *File) AppendAudit(ctx context.Context, e audit.Entry) (audit.Entry, err
 	return saved, nil
 }
 
+// AuditAnchor implements audit.AnchorSource.
+func (f *File) AuditAnchor(ctx context.Context) (audit.Anchor, bool, error) {
+	if err := f.check(); err != nil {
+		return audit.Anchor{}, false, err
+	}
+	return f.mem.AuditAnchor(ctx)
+}
+
+// ArchiveAudit implements Store. The journal is compacted right after, so
+// the deleted entries leave the disk too, not only memory: archiving is
+// often for a retention rule. If compaction fails, the entries are
+// archived but still in the journal, and the error says so.
+func (f *File) ArchiveAudit(ctx context.Context, a audit.Anchor) (int64, error) {
+	var n int64
+	err := f.write(func() (*record, error) {
+		m := f.mem
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if err := m.checkArchiveLocked(a); err != nil {
+			return nil, err
+		}
+		n = m.archiveLocked(a)
+		return &record{Op: opArchive, Anchor: &a}, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.compactNow(); err != nil {
+		return n, fmt.Errorf("store: %d entries archived, but the journal still holds them on disk until it is next compacted: %w", n, err)
+	}
+	return n, nil
+}
+
 // ListAudit implements Store.
 func (f *File) ListAudit(ctx context.Context, filter audit.Filter) ([]audit.Entry, error) {
 	if err := f.check(); err != nil {

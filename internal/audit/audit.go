@@ -35,6 +35,10 @@ const (
 	OutcomeToolPinned   Outcome = "tool_pinned"   // listed for the first time, and pinned
 	OutcomeToolChanged  Outcome = "tool_changed"  // listed with a definition other than its pin
 	OutcomeToolAccepted Outcome = "tool_accepted" // a person accepted the change
+
+	// OutcomeArchived: older entries were written to an archive file and
+	// deleted from the log. Detail names the file and the entries.
+	OutcomeArchived Outcome = "archived"
 )
 
 // Entry is one line in the audit log. It never holds raw arguments, only
