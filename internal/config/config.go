@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/matutozi/consequence-os/internal/policy"
+	"github.com/matutozi/consequence-os/pkg/verify"
 )
 
 const (
@@ -185,6 +186,46 @@ type Receipts struct {
 	MLDSA87KeyEnv string        `yaml:"mldsa87_key_env"`
 	Ed25519Key    string        `yaml:"-"`
 	MLDSA87Key    string        `yaml:"-"`
+
+	// PreviousKeysEnv names an env var holding the public keys the server
+	// signed with before a rotation, as a JWKS: what consequenced -jwks
+	// printed before the rotation. Audit heads signed with them always
+	// verify. Until PreviousKeysUntil they are also published and accepted
+	// for receipts, so receipts issued just before the rotation still work
+	// and receivers can switch over. See docs/receivers.md.
+	PreviousKeysEnv string `yaml:"previous_keys_env"`
+	// PreviousKeysUntilText is previous_keys_until as written, an RFC 3339
+	// time; validate parses it into PreviousKeysUntil, naming the setting
+	// in any error.
+	PreviousKeysUntilText string    `yaml:"previous_keys_until"`
+	PreviousKeysUntil     time.Time `yaml:"-"`
+	PreviousKeys          string    `yaml:"-"`
+}
+
+// validatePrevious checks the previous keys can be read, and come with
+// the time they stop being accepted for receipts. Whether each is really a
+// key of ours is checked when the keys are loaded.
+func (r *Receipts) validatePrevious() error {
+	if r.PreviousKeysUntilText != "" {
+		t, err := time.Parse(time.RFC3339, r.PreviousKeysUntilText)
+		if err != nil {
+			return fmt.Errorf("receipts.previous_keys_until %q must be a time like 2026-11-20T00:00:00Z", r.PreviousKeysUntilText)
+		}
+		r.PreviousKeysUntil = t
+	}
+	switch {
+	case r.PreviousKeysEnv == "" && !r.PreviousKeysUntil.IsZero():
+		return errors.New("receipts.previous_keys_until is set but receipts.previous_keys_env is not")
+	case r.PreviousKeysEnv == "":
+		return nil
+	case r.PreviousKeysUntil.IsZero():
+		return errors.New("receipts.previous_keys_until is required with previous_keys_env: until when receipts signed with the previous keys are accepted, " +
+			"e.g. a day after the rotation. After a key was leaked, make it the time of the rotation, so they never are")
+	}
+	if _, err := verify.ParseJWKS([]byte(r.PreviousKeys)); err != nil {
+		return fmt.Errorf("env var %s (receipts.previous_keys_env): %w", r.PreviousKeysEnv, err)
+	}
+	return nil
 }
 
 // Agent is a caller of the proxy. The API key itself never lives in the
@@ -510,6 +551,13 @@ func (c *Config) resolveSecrets(lookupEnv LookupEnv) error {
 		}
 		c.UpstreamAuth = value
 	}
+	if c.Receipts.PreviousKeysEnv != "" {
+		value, ok := lookupEnv(c.Receipts.PreviousKeysEnv)
+		if !ok || strings.TrimSpace(value) == "" {
+			return fmt.Errorf("env var %s (receipts.previous_keys_env) is not set", c.Receipts.PreviousKeysEnv)
+		}
+		c.Receipts.PreviousKeys = value
+	}
 	if c.DatabaseURLEnv != "" {
 		value, ok := lookupEnv(c.DatabaseURLEnv)
 		if !ok || value == "" {
@@ -568,6 +616,9 @@ func (c *Config) validate() error {
 	}
 	if c.Receipts.TTL < 0 {
 		return errors.New("receipts.ttl must be positive")
+	}
+	if err := c.Receipts.validatePrevious(); err != nil {
+		return err
 	}
 	if err := validateAgents(c.Agents); err != nil {
 		return err

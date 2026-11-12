@@ -22,11 +22,23 @@ var b64 = base64.RawURLEncoding.Strict()
 
 // Keys is the server's signing key pair set. The private halves never
 // leave the process; the public halves are published as a JWKS.
+//
+// After a rotation, Keys also holds the public keys the server signed with
+// before (AddPrevious). Audit heads signed with them always verify, since a
+// saved head is evidence for as long as it's kept. Until a set time they
+// are also published and accepted for receipts, so receipts issued just
+// before the rotation still work, and receivers can switch over.
 type Keys struct {
 	ed      ed25519.PrivateKey
 	edKid   string
 	mldsa   *mldsa.PrivateKey
 	mldsaID string
+
+	previous      []verify.JWK
+	previousUntil time.Time
+	// The key sets receipts are checked with: the current keys alone, and
+	// with the previous ones. Kept up to date by LoadKeys and AddPrevious.
+	current, all *verify.KeySet
 }
 
 // LoadKeys builds Keys from two base64url seeds (32 bytes each), as produced
@@ -45,12 +57,17 @@ func LoadKeys(ed25519Seed, mldsaSeed string) (*Keys, error) {
 		return nil, fmt.Errorf("receipt: ML-DSA-87 key: %w", err)
 	}
 	ed := ed25519.NewKeyFromSeed(edRaw)
-	return &Keys{
+	k := &Keys{
 		ed:      ed,
 		edKid:   verify.KeyID(verify.AlgEd25519, ed.Public().(ed25519.PublicKey)), // .(T) asserts the concrete type
 		mldsa:   ml,
 		mldsaID: verify.KeyID(verify.AlgMLDSA87, ml.PublicKey().Bytes()),
-	}, nil
+	}
+	if k.current, err = keySet(k.JWKS()); err != nil {
+		return nil, err
+	}
+	k.all = k.current
+	return k, nil
 }
 
 // GenerateSeeds returns fresh random seeds for LoadKeys.
@@ -65,12 +82,109 @@ func GenerateSeeds() (ed25519Seed, mldsaSeed string, err error) {
 	return b64.EncodeToString(ed), b64.EncodeToString(ml), nil
 }
 
-// JWKS returns the public keys in the form served at /.well-known/consequence-keys.
+// JWKS returns the public keys the server signs with now.
 func (k *Keys) JWKS() verify.JWKS {
 	return verify.JWKS{Keys: []verify.JWK{
 		verify.Ed25519JWK(k.ed.Public().(ed25519.PublicKey)),
 		verify.MLDSA87JWK(k.mldsa.PublicKey()),
 	}}
+}
+
+// AddPrevious adds the public keys the server signed with before a
+// rotation, as a JWKS. Until until, they are published beside the current
+// keys and accepted for receipts; audit heads they signed verify always.
+// Every key must be an Ed25519 or ML-DSA-87 key whose kid is the one
+// ConsequenceOS derives from it, and none may be a current key.
+func (k *Keys) AddPrevious(jwks []byte, until time.Time) error {
+	if _, err := verify.ParseJWKS(jwks); err != nil {
+		return fmt.Errorf("receipt: previous keys: %w", err)
+	}
+	var doc verify.JWKS
+	if err := json.Unmarshal(jwks, &doc); err != nil {
+		return fmt.Errorf("receipt: previous keys: %w", err)
+	}
+	seen := map[string]bool{k.edKid: true, k.mldsaID: true}
+	for _, j := range doc.Keys {
+		var alg string
+		var pub []byte
+		var err error
+		switch {
+		case j.Kty == "OKP" && j.Crv == "Ed25519" && j.Alg == verify.AlgEd25519:
+			alg = verify.AlgEd25519
+			pub, err = b64.DecodeString(j.X)
+		case j.Kty == "AKP" && j.Alg == verify.AlgMLDSA87:
+			alg = verify.AlgMLDSA87
+			pub, err = b64.DecodeString(j.Pub)
+		default:
+			return fmt.Errorf("receipt: previous key %q is neither an Ed25519 nor an ML-DSA-87 key", j.Kid)
+		}
+		if err != nil || verify.KeyID(alg, pub) != j.Kid {
+			return fmt.Errorf("receipt: previous key %q: its kid isn't the one derived from the key; copy keys as consequenced -jwks prints them", j.Kid)
+		}
+		if j.Kid == k.edKid || j.Kid == k.mldsaID {
+			return fmt.Errorf("receipt: previous key %q is a current signing key; previous keys are the ones used before a rotation", j.Kid)
+		}
+		if seen[j.Kid] {
+			continue // listed twice: once is enough
+		}
+		seen[j.Kid] = true
+		k.previous = append(k.previous, j)
+	}
+	k.previousUntil = until
+	var err error
+	k.all, err = keySet(k.All())
+	return err
+}
+
+// receiptKeys is the key set receipts are accepted from at now: the keys
+// published then.
+func (k *Keys) receiptKeys(now time.Time) *verify.KeySet {
+	if now.Before(k.previousUntil) {
+		return k.all
+	}
+	return k.current
+}
+
+// Published returns the keys to publish at now: the current keys, and the
+// previous ones until their time is up. Receipts signed with any of them
+// verify.
+func (k *Keys) Published(now time.Time) verify.JWKS {
+	set := k.JWKS()
+	if now.Before(k.previousUntil) {
+		set.Keys = append(set.Keys, k.previous...)
+	}
+	return set
+}
+
+// PublishedUntil is when the previous keys stop being published, or the
+// zero time when there are none, or they already have.
+func (k *Keys) PublishedUntil(now time.Time) time.Time {
+	if len(k.previous) == 0 || !now.Before(k.previousUntil) {
+		return time.Time{}
+	}
+	return k.previousUntil
+}
+
+// All returns every public key the server knows, current and previous,
+// whatever the time: what audit heads are checked with, and what the next
+// rotation's previous keys are.
+func (k *Keys) All() verify.JWKS {
+	set := k.JWKS()
+	set.Keys = append(set.Keys, k.previous...)
+	return set
+}
+
+// HeadKeys is the key set saved audit heads are checked with: every key
+// the server has signed with.
+func (k *Keys) HeadKeys() *verify.KeySet { return k.all }
+
+// keySet parses jwks through the public path, as a receiver would.
+func keySet(jwks verify.JWKS) (*verify.KeySet, error) {
+	raw, err := json.Marshal(jwks)
+	if err != nil {
+		return nil, err
+	}
+	return verify.ParseJWKS(raw)
 }
 
 // Input is what a receipt says about one call.
@@ -215,9 +329,11 @@ type UsedStore interface {
 	MarkReceiptUsed(ctx context.Context, receiptID string, usedAt, expiresAt time.Time) error
 }
 
-// Checker is the server side of POST /v1/receipts/verify.
+// Checker is the server side of POST /v1/receipts/verify. It accepts
+// receipts signed with the keys published at the time: the current ones,
+// and the previous ones until their time is up.
 type Checker struct {
-	keys *verify.KeySet
+	keys *Keys
 	used UsedStore
 	now  func() time.Time
 }
@@ -226,15 +342,10 @@ func NewChecker(keys *Keys, used UsedStore, now func() time.Time) (*Checker, err
 	if now == nil {
 		now = time.Now
 	}
-	jwks, err := json.Marshal(keys.JWKS())
-	if err != nil {
-		return nil, err
+	if keys == nil || used == nil {
+		return nil, errors.New("receipt: NewChecker needs keys and a used-receipt store")
 	}
-	set, err := verify.ParseJWKS(jwks) // go through the public path, as a receiver would
-	if err != nil {
-		return nil, err
-	}
-	return &Checker{keys: set, used: used, now: now}, nil
+	return &Checker{keys: keys, used: used, now: now}, nil
 }
 
 // Verify checks everything for the receiver whose ID is receiver, and
@@ -243,7 +354,7 @@ func NewChecker(keys *Keys, used UsedStore, now func() time.Time) (*Checker, err
 // receiver can't use up a v1 receipt that isn't for it.
 func (c *Checker) Verify(ctx context.Context, receiver string, encoded []byte, tool string, arguments []byte) (*verify.Receipt, error) {
 	now := c.now()
-	r, err := verify.VerifyOffline(encoded, c.keys, now)
+	r, err := verify.VerifyOffline(encoded, c.keys.receiptKeys(now), now)
 	if err != nil {
 		return nil, err
 	}

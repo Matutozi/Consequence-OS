@@ -9,6 +9,7 @@
 //	consequenced -tools                              list the pinned tool definitions
 //	consequenced -accept-tool notes.read             accept a changed tool definition, after asking on the terminal
 //	consequenced -genkeys                            print fresh receipt signing keys
+//	consequenced -jwks                               print every public key the config knows, for a key rotation
 //	consequenced -version                            print the version
 package main
 
@@ -106,6 +107,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	toolArgs := fs.String("args", "{}", "JSON arguments for -tool")
 	at := fs.String("at", "", "for -tool: decide as if the call came at this RFC 3339 time (default now)")
 	genKeys := fs.Bool("genkeys", false, "print fresh receipt signing keys as env var lines and exit")
+	printJWKS := fs.Bool("jwks", false, "print every public key this config knows, current and previous, as one line of JSON: receipts.previous_keys_env after the next rotation")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	verifyAudit := fs.Bool("verify-audit", false, "check the stored audit log's hash chain and exit; fails if it was tampered with")
 	auditHead := fs.String("audit-head", "", "with -verify-audit: a signed head saved from GET /v1/audit/head; the log must still contain it")
@@ -194,7 +196,21 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return checkAuditChain(ctx, out, cfg, *auditHead)
 	case *tool != "":
 		return explain(out, engine, *tool, *toolArgs, *at)
+	case *printJWKS:
+		keys, err := loadKeys(cfg)
+		if err != nil {
+			return err
+		}
+		line, err := json.Marshal(keys.All())
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "%s\n", line)
+		return nil
 	case *check:
+		if _, err := loadKeys(cfg); err != nil {
+			return err
+		}
 		printSummary(out, cfg)
 		printWarnings(out, cfg, engine)
 		return nil
@@ -505,9 +521,9 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 	}
 	defer st.Close() // runs when serve returns, after the server has shut down
 
-	keys, err := receipt.LoadKeys(cfg.Receipts.Ed25519Key, cfg.Receipts.MLDSA87Key)
+	keys, err := loadKeys(cfg)
 	if err != nil {
-		return fmt.Errorf("%w (generate keys with: consequenced -genkeys)", err)
+		return err
 	}
 	checker, err := receipt.NewChecker(keys, st, nil)
 	if err != nil {
@@ -693,19 +709,13 @@ func loadSavedHead(cfg *config.Config, path string) (*verify.AuditHead, error) {
 	if err != nil {
 		return nil, err
 	}
-	keys, err := receipt.LoadKeys(cfg.Receipts.Ed25519Key, cfg.Receipts.MLDSA87Key)
+	keys, err := loadKeys(cfg)
 	if err != nil {
 		return nil, err
 	}
-	jwks, err := json.Marshal(keys.JWKS())
-	if err != nil {
-		return nil, err
-	}
-	set, err := verify.ParseJWKS(jwks)
-	if err != nil {
-		return nil, err
-	}
-	head, err := verify.VerifyAuditHead(data, set)
+	// Every key the server has signed with: a head stays evidence after a
+	// rotation.
+	head, err := verify.VerifyAuditHead(data, keys.HeadKeys())
 	if err != nil {
 		return nil, fmt.Errorf("saved head %s: %w", path, err)
 	}
@@ -748,6 +758,20 @@ func openStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (store
 	}
 	log.Info("using Postgres store; migrations are up to date")
 	return pg, nil
+}
+
+// loadKeys loads the signing keys, and the previous ones after a rotation.
+func loadKeys(cfg *config.Config) (*receipt.Keys, error) {
+	keys, err := receipt.LoadKeys(cfg.Receipts.Ed25519Key, cfg.Receipts.MLDSA87Key)
+	if err != nil {
+		return nil, fmt.Errorf("%w (generate keys with: consequenced -genkeys)", err)
+	}
+	if cfg.Receipts.PreviousKeysEnv != "" {
+		if err := keys.AddPrevious([]byte(cfg.Receipts.PreviousKeys), cfg.Receipts.PreviousKeysUntil); err != nil {
+			return nil, fmt.Errorf("env var %s (receipts.previous_keys_env): %w", cfg.Receipts.PreviousKeysEnv, err)
+		}
+	}
+	return keys, nil
 }
 
 // printKeys prints fresh seeds in a form you can paste into a shell or .env file.
@@ -810,6 +834,13 @@ func printSummary(out io.Writer, cfg *config.Config) {
 		email = "from " + cfg.Email.From + ", SMTP URL from $" + cfg.Email.SMTPURLEnv
 	}
 	fmt.Fprintf(out, "  approval email:    %s\n", email)
+	if cfg.Receipts.PreviousKeysEnv != "" {
+		when := "accepted for receipts until " + cfg.Receipts.PreviousKeysUntil.Format(time.RFC3339)
+		if !time.Now().Before(cfg.Receipts.PreviousKeysUntil) {
+			when = "for audit heads only (receipts stopped " + cfg.Receipts.PreviousKeysUntil.Format(time.RFC3339) + ")"
+		}
+		fmt.Fprintf(out, "  previous keys:     from $%s, %s\n", cfg.Receipts.PreviousKeysEnv, when)
+	}
 	if cfg.UpstreamAuthEnv != "" {
 		fmt.Fprintf(out, "  upstream token:    from $%s, sent in place of the agent's key\n", cfg.UpstreamAuthEnv)
 	}

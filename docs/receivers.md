@@ -74,4 +74,41 @@ A receipt proves that ConsequenceOS approved these exact arguments. It can't pro
 
 ## Offline checks
 
-The Go package can also check a receipt without contacting ConsequenceOS. Fetch the public keys once from `/.well-known/consequence-keys`, then use `&verify.Offline{Keys: keys, Audience: "payments-api"}`, with the ID that ConsequenceOS's `upstream_receiver` names your service by. Without `Audience`, v1 receipts are refused. It checks signatures, expiry, the tool and the arguments, but it **can't enforce single use**, so keep your own record of used receipt IDs if you rely on it.
+The Go package can also check a receipt without contacting ConsequenceOS. It needs the public keys from `/.well-known/consequence-keys`, and the ID that ConsequenceOS's `upstream_receiver` names your service by. Without `Audience`, v1 receipts are refused. It checks signatures, expiry, the tool and the arguments, but it **can't enforce single use**, so keep your own record of used receipt IDs if you rely on it.
+
+```go
+v := &verify.Offline{
+	Audience: "payments-api",
+	// Fetch the keys on the first receipt, and again when a receipt names a
+	// key you don't have, as happens after a rotation: at most once a minute.
+	Refresh: func(ctx context.Context) (*verify.KeySet, error) {
+		return verify.FetchKeys(ctx, nil, "https://consequence.example")
+	},
+}
+```
+
+Without `Refresh`, set `Keys` from `verify.FetchKeys` yourself, and fetch them again when ConsequenceOS rotates its keys.
+
+## Rotating the signing keys
+
+Rotate them on a schedule, or at once if they may have leaked. Receivers using the verify endpoint need do nothing. On the ConsequenceOS server:
+
+1. **Save the public keys it signs with now:** `consequenced -jwks > old-keys.json`. This prints every key the config knows, including keys from earlier rotations, on one line.
+2. **Make new keys** with `consequenced -genkeys`, and put them in the env vars that `receipts.ed25519_key_env` and `receipts.mldsa87_key_env` name.
+3. **Name the old keys** in the config, and put the saved line in that env var:
+
+   ```yaml
+   receipts:
+     ed25519_key_env: CONSEQUENCE_SIGNING_KEY_ED25519
+     mldsa87_key_env: CONSEQUENCE_SIGNING_KEY_MLDSA87
+     previous_keys_env: CONSEQUENCE_PREVIOUS_KEYS     # = the contents of old-keys.json
+     previous_keys_until: 2026-11-21T00:00:00Z         # e.g. a day after the rotation
+   ```
+
+4. **Check and restart:** `consequenced -check` shows the previous keys and until when they're accepted.
+
+From then on, new receipts are signed with the new keys only. Until `previous_keys_until`, the old public keys are also published at `/.well-known/consequence-keys` and accepted for receipts. That way receipts issued just before the restart still work, and offline receivers with `Refresh` pick up the new keys on the first receipt that names one. Offline receivers without `Refresh` must fetch the keys again in that window. The JWKS endpoint's cache lifetime shrinks so that no receiver caches it past that time.
+
+After `previous_keys_until`, the old keys are no longer published or accepted for receipts, with no restart needed. Keep them in `previous_keys_env` anyway: audit heads signed with them still verify with `consequenced -verify-audit -audit-head`, because a saved head stays evidence for as long as it's kept.
+
+**If the old keys may have leaked,** set `previous_keys_until` to the time of the rotation. Then the verify endpoint never accepts receipts signed with them. An offline receiver with `Refresh` drops the old keys on the first genuine receipt it gets after the rotation, which names a new key. Until then it still trusts the old keys, so restart offline receivers, or set their keys afresh, when you rotate after a leak. Saved heads signed before the leak still check out, but a head the thief signed would too, so trust only the heads you saved before then.

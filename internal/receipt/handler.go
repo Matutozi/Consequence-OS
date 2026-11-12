@@ -4,10 +4,12 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/matutozi/consequence-os/pkg/verify"
 )
@@ -85,11 +87,21 @@ func receiverFor(header string, receivers map[string]string) string {
 }
 
 // KeysHandler serves GET /.well-known/consequence-keys.
-func KeysHandler(keys *Keys) http.Handler {
-	jwks, _ := json.Marshal(keys.JWKS()) // public keys don't change while running
+func KeysHandler(keys *Keys) http.Handler { return keysHandler(keys, time.Now) }
+
+// keysHandler serves the keys published at the time. Receivers may cache
+// them for five minutes, but not past the moment the previous keys stop
+// being published.
+func keysHandler(keys *Keys, now func() time.Time) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t := now()
+		maxAge := 300
+		if until := keys.PublishedUntil(t); !until.IsZero() {
+			maxAge = min(maxAge, int(until.Sub(t).Seconds()))
+		}
+		jwks, _ := json.Marshal(keys.Published(t))
 		w.Header().Set("Content-Type", "application/jwk-set+json")
-		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", maxAge))
 		_, _ = w.Write(jwks)
 	})
 }

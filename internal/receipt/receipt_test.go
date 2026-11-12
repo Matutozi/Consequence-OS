@@ -37,6 +37,7 @@ func (u *usedMemory) MarkReceiptUsed(_ context.Context, id string, _, _ time.Tim
 var testStart = time.Date(2026, 11, 2, 10, 14, 0, 0, time.UTC)
 
 type harness struct {
+	seeds   [2]string // the seeds keys came from
 	keys    *Keys
 	issuer  *Issuer
 	checker *Checker
@@ -59,7 +60,7 @@ func newHarness(t *testing.T) harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return harness{keys: keys, issuer: NewIssuer(keys, "http://cos.test", 5*time.Minute, now), checker: checker, clock: &clock}
+	return harness{seeds: [2]string{ed, ml}, keys: keys, issuer: NewIssuer(keys, "http://cos.test", 5*time.Minute, now), checker: checker, clock: &clock}
 }
 
 const args = `{"amount":4800,"po":"00231"}`
