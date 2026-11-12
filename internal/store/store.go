@@ -12,6 +12,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/approval"
 	"github.com/matutozi/consequence-os/internal/audit"
 	"github.com/matutozi/consequence-os/internal/policy"
+	"github.com/matutozi/consequence-os/internal/toolpin"
 	"github.com/matutozi/consequence-os/pkg/verify"
 )
 
@@ -44,6 +45,9 @@ type Store interface {
 	RecordUsage(ctx context.Context, u policy.UsageRecord) error
 	PruneUsage(ctx context.Context, before time.Time) (int64, error)
 
+	// Pins of upstream tool definitions; see internal/toolpin.
+	toolpin.Repository
+
 	// Close releases connections. The in-memory store has nothing to release.
 	Close()
 }
@@ -56,11 +60,12 @@ type Memory struct {
 	approvals []approval.Approval  // in creation order
 	receipts  map[string]time.Time // used receipt ID -> its expiry
 	usage     []policy.UsageRecord
+	pins      map[pinKey]toolpin.Pin
 }
 
 // NewMemory returns an empty in-memory store.
 func NewMemory() *Memory {
-	return &Memory{receipts: map[string]time.Time{}}
+	return &Memory{receipts: map[string]time.Time{}, pins: map[pinKey]toolpin.Pin{}}
 }
 
 // Close implements Store.

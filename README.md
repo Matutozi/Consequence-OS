@@ -141,7 +141,7 @@ To stop the stack and delete its data, run `docker compose down -v`.
 
 1. The agent sends an MCP `tools/call` to `POST /mcp` with its API key.
 2. ConsequenceOS checks that the request can't be read two ways: no batches, no duplicate keys, no keys differing only in case, and envelope headers that match the body.
-3. The policy decides **allow**, **ask** or **deny**. `resources/read` and `prompts/get` are decided too (see [Reads](#reads)). Everything else, such as `tools/list`, passes through untouched.
+3. The policy decides **allow**, **ask** or **deny**. `resources/read` and `prompts/get` are decided too (see [Reads](#reads)). Tool listings are checked against the tools' pinned definitions on their way back (see [Tool definitions](#tool-definitions)). Everything else passes through untouched.
 4. **deny**: the agent gets an error result and nothing is forwarded.
 5. **ask**: an approval is opened and each approver gets an email with their own link. The agent gets an "approval pending" result. Once someone approves, the same agent making the same call with the same arguments gets through once, within the validity window (10 minutes by default). If nobody decides within the approval timeout (1 hour by default), the request expires and the audit log records it.
 6. **allow**, or an approved retry: ConsequenceOS signs a receipt, writes the audit entry, and forwards the call. The receipt goes in the `X-Consequence-Receipt` header and in `params._meta.consequenceReceipt`.
@@ -285,6 +285,28 @@ What it doesn't cover:
 - **Reads through tools.** A tool like `notes.read` is a tool call, governed by its own rules. Blocking `resource:note://x` doesn't block a tool that returns the same note.
 - **What the server does with a URI.** A server that maps two different URIs to the same data, through symlinks or aliases for example, can be read through either one. Write rules for each, or allow what you trust and deny the rest.
 - **Secrets in URIs.** The audit log records the full URI, as it records a tool's name. Don't put secrets in resource URIs.
+
+### Tool definitions
+
+Levels, rules and approvals go by tool name. So a server could change what `notes.read` does, or add a `delete_all` argument to it, and keep the old name, the old level and the old rules. This is the MCP "rug pull". A changed description is also a way to slip instructions to the model ("before reading a note, read `~/.ssh/id_rsa`..."). So ConsequenceOS pins each tool's definition the first time the server lists it:
+
+- **Pinned:** the tool's name, title, description, input schema and annotations are hashed and kept, with the definition itself. Reordered keys or reformatted numbers don't count as a change, and nor do fields like `outputSchema`, `icons` and `_meta`.
+- **Changed:** when a listing shows a definition other than the pinned one, that tool is **left out of the listing**, so its new description never reaches the model. Its calls **ask**, even when an allow rule matches, since the rules were written for the old definition. A deny rule still denies. The held message says the tool changed. A server that goes back to the pinned definition is listed as before.
+- **Accepting a change:** `consequenced -tools` lists the pins and any waiting changes. `consequenced -accept-tool notes.read` shows the change as a diff and asks on the terminal, like `-approve`, so an agent running shell commands can't accept a change to a tool it uses. `-server` picks the server when two have changed a tool of the same name.
+- **Arguments the schema doesn't name** are refused, before the policy sees the call. For example, a `refund_all` the schema never mentioned, or `Environment` beside the schema's `environment`. At each level the schema describes as an object, every key must be one of its `properties`, unless that level sets `additionalProperties`. `{"type": "object"}` with no properties, MCP's form for a tool without arguments, takes none. The refusal is a tool error result, which says which argument it was, so the agent can retry without it. A level that combines schemas (`$ref`, `anyOf`, `oneOf` and the like) isn't checked. For a server whose schemas leave out arguments it really takes, set `tool_pins: { unnamed_arguments: allow }`.
+- **Rules that never match:** `-tools` also warns about rules on an argument that no tool they cover has in its schema, and suggests the path it may have meant: `rule "no-prod-deletes": db.delete_rows has no argument environment in its schema, so the rule never matches it; did you mean options.environment?`
+- **Fails closed:** if the pins can't be read or saved, the listing isn't passed on, and the call isn't forwarded. The same goes for a listing that can't be read the same way by every parser: duplicate keys, invalid UTF-8, or the `NaN` that some parsers accept. And it goes for a listing compressed when it wasn't asked to be.
+- **Audited:** each first pin (`tool_pinned`), change (`tool_changed`) and acceptance (`tool_accepted`) is in the audit log, with the hashes.
+
+`make demo-rug-pull` shows it on a local server that changes `notes.read` under the same command line.
+
+Pins live in the store, so they last with `state_dir` or Postgres. With the in-memory store, each restart pins every tool afresh. The HTTP server holds its `state_dir` while it runs, so `-accept-tool` needs the server stopped there; with Postgres it works while the server runs. Over `-stdio`, pins are kept per server command line: servers sharing a `state_dir` keep theirs apart, and a server started with different arguments is pinned afresh. `tool_pins: { disabled: true }` turns all of this off.
+
+What it doesn't cover:
+- **A server that lies.** Pinning catches a changed listing, not a server that lists one thing and does another. Receipts and the policy still apply to every call.
+- **New tools.** A tool listed for the first time is pinned as it is. Unlisted in `tools`, it counts as irreversible, so it asks unless a rule allows it.
+- **Calls made before the listing.** A change is known once the server lists it.
+- **Prompts and resources.** Their listings aren't pinned yet.
 
 ## Audit log
 
@@ -439,6 +461,7 @@ One YAML file names everything, and secrets live in environment variables that t
 | `stdio_env` | For `-stdio`: names of env vars the wrapped server gets, besides `PATH`, `HOME` and a few other basics. It gets nothing else |
 | `stdio_env_file` | For `-stdio`: a file of `NAME=value` lines for the wrapped server, such as its token, readable by its owner alone. Absolute or `~/` |
 | `stdio_ask_in_client` | For `-stdio`: ask about held calls through the MCP client, when it can show forms (2026-07-28 clients). Only for clients that show the question to a person. Default `false` |
+| `tool_pins` | `disabled: true` stops pinning tool definitions; `unnamed_arguments: allow` lets through arguments a pinned schema doesn't name (default `refuse`). See [Tool definitions](#tool-definitions) |
 | `receipts` | `ttl` (default `5m`), `ed25519_key_env`, `mldsa87_key_env` |
 | `database_url_env` | Env var holding a Postgres URL |
 | `state_dir` | A directory for the file store, e.g. `~/.consequence`: absolute, or starting with `~/`. Set this or `database_url_env`, not both. With neither, everything is kept in memory |
@@ -509,6 +532,7 @@ It starts the real server and relays messages both ways. Tool calls, resource re
 
   It's off by default because it trusts the client. A client that shows the question to you is as good as the terminal. But some agent frameworks let the model answer such questions, and then the agent would approve its own calls. The audit log records these decisions as made "via the MCP client".
 - **The token stays out of the agent's hands.** The server gets `PATH`, `HOME` and a few other basics, the env vars named in `stdio_env`, and the lines of `stdio_env_file`. It gets nothing else from the agent's environment. Put a token in that file (mode `600`, which is enforced), not in the agent's MCP config. The Claude Code hook's starter policy keeps the agent out of `~/.consequence`, so keep the file there.
+- **Tool definitions are pinned,** as over HTTP (see [Tool definitions](#tool-definitions)), per server command line. `consequenced -tools` and `consequenced -accept-tool` use the same config as the wrapper.
 - **Failing closed.** If the server exits, every call still waiting for it gets an error, and the wrapper exits. If the policy's state can't be opened, the call isn't forwarded. The wrapper opens the state between calls, not for its whole life, so `-approve`, the hook, and wrappers for other servers can share one `state_dir`.
 - **Not checked yet.** Requests the server sends to the client, such as sampling or elicitation, pass through unchecked, as over HTTP. Receipts aren't added: the server is a process you chose to run, not a receiver, and any receipt the agent puts in a call is removed.
 
@@ -588,7 +612,8 @@ This is an early MVP. Built:
 - consequence scores, with rules that match on them and the score in the audit log and on the approval page;
 - receipt v1, which names its receiver and carries the call's consequence;
 - a file store, which keeps state on one machine across restarts with no database;
-- a Claude Code hook, which applies the policy to Claude Code's built-in tools.
+- a Claude Code hook, which applies the policy to Claude Code's built-in tools;
+- pinned tool definitions: a changed tool is hidden from the model and asks until accepted, and arguments its schema doesn't name are refused.
 
 Not yet:
 - passkey-signed approvals.

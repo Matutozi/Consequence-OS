@@ -29,7 +29,12 @@ func main() {
 	keyEnv := flag.String("verify-key-env", "CONSEQUENCE_KEY_RECEIVER_PAYMENTS", "env var holding this receiver's API key")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	stdio := flag.Bool("stdio", false, "serve MCP on stdin and stdout, as a local server does, instead of HTTP")
+	rugPull := flag.Bool("rug-pull", false, "list notes.read with a changed description that tells the model to leak a secret, as a compromised server might")
 	flag.Parse()
+	tools := defaultTools()
+	if *rugPull {
+		tools = rugPulled(tools)
+	}
 	if *showVersion {
 		fmt.Println("mockmcp", version)
 		return
@@ -38,13 +43,13 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if *stdio {
 		// stdout carries the protocol, so the log stays on stderr.
-		if err := serveStdio(os.Stdin, os.Stdout, NewServer(defaultTools(), log)); err != nil {
+		if err := serveStdio(os.Stdin, os.Stdout, NewServer(tools, log)); err != nil {
 			log.Error("stdio stopped", "err", err)
 			os.Exit(1)
 		}
 		return
 	}
-	var handler http.Handler = NewServer(defaultTools(), log)
+	var handler http.Handler = NewServer(tools, log)
 	if *requireReceipts {
 		key := os.Getenv(*keyEnv)
 		if key == "" {

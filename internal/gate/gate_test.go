@@ -17,6 +17,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/consequence"
 	"github.com/matutozi/consequence-os/internal/policy"
 	"github.com/matutozi/consequence-os/internal/store"
+	"github.com/matutozi/consequence-os/internal/toolpin"
 )
 
 // syncBuffer is a bytes buffer that is safe to write from several goroutines.
@@ -50,6 +51,7 @@ type options struct {
 	resolver   consequence.Resolver
 	maxPending int
 	local      bool // no approval service, as in the hook mode
+	tools      bool // pin tool definitions, as the proxy does
 }
 
 func defaultRules() []policy.Rule {
@@ -85,6 +87,11 @@ func newFixture(t *testing.T, o options) fixture {
 	}
 	if o.local {
 		opts.Approvals = nil
+	}
+	if o.tools {
+		if opts.Tools, err = toolpin.New(toolpin.Options{Repo: o.store, Audit: o.store, Server: pinServer, Log: opts.Log, Now: now}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	g, err := New(opts)
 	if err != nil {

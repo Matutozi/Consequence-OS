@@ -31,7 +31,7 @@ async with http, Client(streamable_http_client("https://consequence-os.example/m
 
 A runnable version is in [examples/python-agent](../examples/python-agent/agent.py). Any MCP client that speaks Streamable HTTP works: revision 2026-07-28, or older clients that use `initialize`.
 
-`tools/call`, `resources/read` and `prompts/get` are checked. Everything else, such as `tools/list` and notifications, passes through unchanged.
+`tools/call`, `resources/read` and `prompts/get` are checked. `tools/list` answers are checked against the tools' pinned definitions: a tool whose definition changed is left out until someone accepts the change (see [Tool definitions](../README.md#tool-definitions)). Everything else, such as notifications, passes through unchanged.
 
 ## 3. Handle the three outcomes
 

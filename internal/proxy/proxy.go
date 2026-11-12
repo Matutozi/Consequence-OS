@@ -25,6 +25,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/policy"
 	"github.com/matutozi/consequence-os/internal/receipt"
 	"github.com/matutozi/consequence-os/internal/store"
+	"github.com/matutozi/consequence-os/internal/toolpin"
 	"github.com/matutozi/consequence-os/pkg/verify"
 )
 
@@ -49,8 +50,12 @@ type Options struct {
 	// Bearer <token>" in place of the agent's key. It is scrubbed from every
 	// response, and never logged.
 	UpstreamAuth string
-	Log          *slog.Logger
-	Now          func() time.Time // nil means time.Now; tests pass a fixed clock
+	// Tools pins the upstream's tool definitions: listings are checked on
+	// their way to the agent, and calls against what was accepted. nil
+	// turns that off.
+	Tools *toolpin.Service
+	Log   *slog.Logger
+	Now   func() time.Time // nil means time.Now; tests pass a fixed clock
 }
 
 // Proxy implements http.Handler for the /mcp endpoint. It is the HTTP
@@ -65,6 +70,7 @@ type Proxy struct {
 	log       *slog.Logger
 	agents    map[[32]byte]config.Agent // keyed by sha256 of the API key
 	origins   map[string]bool
+	pinning   bool // tool listings are checked; see listing.go
 	rp        *httputil.ReverseProxy
 }
 
@@ -79,7 +85,7 @@ func New(opts Options) (*Proxy, error) {
 	}
 	g, err := gate.New(gate.Options{
 		Engine: opts.Engine, Resolver: opts.Resolver, Store: opts.Store,
-		Approvals: opts.Approvals, Log: opts.Log, Now: opts.Now,
+		Approvals: opts.Approvals, Tools: opts.Tools, Log: opts.Log, Now: opts.Now,
 	})
 	if err != nil {
 		return nil, err
@@ -92,6 +98,7 @@ func New(opts Options) (*Proxy, error) {
 		log:       opts.Log,
 		agents:    make(map[[32]byte]config.Agent, len(opts.Agents)),
 		origins:   make(map[string]bool, len(opts.AllowedOrigins)),
+		pinning:   opts.Tools != nil,
 	}
 	for _, a := range opts.Agents {
 		// Looking agents up by a hash of the key means we never compare raw
@@ -101,7 +108,7 @@ func New(opts Options) (*Proxy, error) {
 	for _, o := range opts.AllowedOrigins {
 		p.origins[strings.TrimSuffix(o, "/")] = true
 	}
-	p.rp = newReverseProxy(upstream, opts.UpstreamAuth, p.log)
+	p.rp = newReverseProxy(upstream, opts.UpstreamAuth, opts.Tools, p.log)
 	return p, nil
 }
 
@@ -138,6 +145,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if rerr := checkHeaders(r.Header, msg, nil); rerr != nil {
 			writeJSON(w, rerr.status, errorResponse(msg.id, rerr.code, rerr.message))
 			return
+		}
+		if msg.method == methodToolsList && p.pinning && len(msg.id) > 0 {
+			// The reverse proxy checks the answer on its way back.
+			r = r.WithContext(context.WithValue(r.Context(), listingKey{}, listing{id: msg.id, by: toolpin.Lister{AgentID: agent.ID, OwnerID: agent.OwnerID}}))
 		}
 		p.forward(w, r, body)
 		return
@@ -188,6 +199,9 @@ func (p *Proxy) handleCall(w http.ResponseWriter, r *http.Request, agent config.
 		refuse(w, msg, call, fmt.Sprintf("Rejected: an approver declined %s (approval %s). Do not retry it; tell the user it was declined.",
 			call.what(), res.Approval.ID))
 
+	case gate.Invalid:
+		refuse(w, msg, call, invalidText(res))
+
 	default: // gate.Held
 		a := res.Approval
 		text := fmt.Sprintf("Approval pending: %s needs a human to approve it (policy rule %q). "+
@@ -198,8 +212,25 @@ func (p *Proxy) handleCall(w http.ResponseWriter, r *http.Request, agent config.
 		if !a.ExpiresAt.IsZero() {
 			text += fmt.Sprintf(" If nobody decides by %s, the request expires.", a.ExpiresAt.Format(time.RFC3339))
 		}
+		text += changedText(res, call)
 		refuse(w, msg, call, text)
 	}
+}
+
+// invalidText words the refusal of a call whose arguments don't fit the
+// tool's pinned schema.
+func invalidText(res *gate.Result) string {
+	return "Refused by ConsequenceOS: " + res.Reason + ". Send only the arguments the tool lists; " +
+		"retry without that one if the call still makes sense."
+}
+
+// changedText says why a call asks when its tool changed, or is empty.
+func changedText(res *gate.Result, call toolCall) string {
+	if !res.ToolChanged {
+		return ""
+	}
+	return fmt.Sprintf(" It asks because the server changed the definition of %s since it was accepted; "+
+		"once someone has checked the change, consequenced -accept-tool %s accepts it.", call.name, call.name)
 }
 
 // fail answers a call the gate could not decide or record. Nothing is
@@ -298,14 +329,18 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte) {
 // newReverseProxy uses the standard library's reverse proxy, which already
 // handles hop-by-hop headers and streaming responses such as SSE. token,
 // when set, is the upstream's credential; see redact.go.
-func newReverseProxy(upstream *url.URL, token string, log *slog.Logger) *httputil.ReverseProxy {
-	var modify func(*http.Response) error
-	if token != "" {
-		modify = func(resp *http.Response) error {
+// tools, when set, checks tools/list answers; see listing.go.
+func newReverseProxy(upstream *url.URL, token string, tools *toolpin.Service, log *slog.Logger) *httputil.ReverseProxy {
+	modify := func(resp *http.Response) error {
+		if token != "" {
 			redactHeaders(resp.Header, token)
 			resp.Body = newRedactor(resp.Body, token)
-			return nil
 		}
+		// After the redactor, so the token can't end up in a pin.
+		if l, ok := resp.Request.Context().Value(listingKey{}).(listing); ok && tools != nil {
+			return checkListingResponse(resp, tools, l, log)
+		}
+		return nil
 	}
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -319,9 +354,11 @@ func newReverseProxy(upstream *url.URL, token string, log *slog.Logger) *httputi
 			pr.Out.Header.Del("Authorization")
 			if token != "" {
 				pr.Out.Header.Set("Authorization", "Bearer "+token)
+			}
+			if _, isListing := pr.In.Context().Value(listingKey{}).(listing); token != "" || isListing {
 				// Without the agent's Accept-Encoding, Go's transport asks
 				// for gzip itself and decompresses the reply, so the token
-				// can be scrubbed from it.
+				// can be scrubbed from it and a listing read.
 				pr.Out.Header.Del("Accept-Encoding")
 			}
 			// Only ConsequenceOS attaches receipts: drop any the agent sent,
@@ -337,6 +374,12 @@ func newReverseProxy(upstream *url.URL, token string, log *slog.Logger) *httputi
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if errors.Is(err, context.Canceled) {
 				return // the agent hung up; nobody to answer
+			}
+			if errors.Is(err, errUncheckedListing) {
+				log.Error("tool list not passed on", "err", err)
+				l, _ := r.Context().Value(listingKey{}).(listing)
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse(l.id, codeInternalError, errUncheckedListing.Error()))
+				return
 			}
 			log.Error("upstream request failed", "err", err)
 			writeJSON(w, http.StatusBadGateway, errorResponse(nil, codeInternalError, "upstream MCP server unavailable"))
