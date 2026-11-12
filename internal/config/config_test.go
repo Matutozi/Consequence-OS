@@ -376,3 +376,37 @@ func TestStateDir(t *testing.T) {
 		t.Errorf("both stores: err = %v", err)
 	}
 }
+
+func TestParseLocal(t *testing.T) {
+	env := fakeEnv(map[string]string{"HOME": "/home/ada"})
+	policyOnly := "state_dir: ~/.consequence\ntools: { Bash: irreversible }\nrules:\n  - { name: shell, tool: Bash, action: ask }\n"
+
+	cfg, err := ParseLocal([]byte(policyOnly), env)
+	if err != nil {
+		t.Fatalf("a policy and a state_dir should be enough: %v", err)
+	}
+	if cfg.StateDir != "/home/ada/.consequence" || cfg.LocalAgent.ID != DefaultLocalAgentID || cfg.LocalAgent.OwnerID != DefaultLocalAgentOwner {
+		t.Errorf("got state_dir %q, local agent %+v", cfg.StateDir, cfg.LocalAgent)
+	}
+	cfg, err = ParseLocal([]byte(policyOnly+"local_agent: { id: claude-code, owner_id: ada }\n"), env)
+	if err != nil || cfg.LocalAgent != (LocalAgent{ID: "claude-code", OwnerID: "ada"}) {
+		t.Errorf("local_agent = %+v, %v", cfg.LocalAgent, err)
+	}
+	// The server's config works too: its secrets aren't needed, so unset env vars don't matter.
+	if _, err := ParseLocal([]byte(validYAML+"state_dir: /srv/state\n"), env); err != nil {
+		t.Errorf("server config with a state_dir: %v", err)
+	}
+
+	for name, tt := range map[string]struct{ yaml, want string }{
+		"no state_dir":  {"rules: []\n", "state_dir is required"},
+		"a bad rule":    {"state_dir: /x\nrules:\n  - { name: r, tool: Bash, action: maybe }\n", "policy:"},
+		"unknown field": {"state_dir: /x\nrule: []\n", "field rule not found"},
+		"empty":         {"", "empty"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseLocal([]byte(tt.yaml), env); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}

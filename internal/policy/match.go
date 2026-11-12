@@ -234,6 +234,11 @@ func matchTool(pattern, tool string) bool {
 	return ok
 }
 
+// MatchTool reports whether name matches the tool pattern of a rule, by
+// the rules the engine uses: * and ? cross "/". Adapters use it to tell
+// which rules cover a tool.
+func MatchTool(pattern, name string) bool { return matchTool(pattern, name) }
+
 func validPattern(pattern string) bool {
 	if strings.ContainsRune(pattern, 0) {
 		return false

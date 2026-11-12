@@ -26,6 +26,9 @@ const (
 	// A decision that was recorded but didn't take effect, because another
 	// approver decided first or saving it failed. It follows the entry it voids.
 	OutcomeNotApplied Outcome = "not_applied"
+	// OutcomeAskedUser: a local mode, such as the Claude Code hook, asked
+	// the person at the keyboard. ConsequenceOS doesn't learn their answer.
+	OutcomeAskedUser Outcome = "asked_user"
 )
 
 // Entry is one line in the audit log. It never holds raw arguments, only

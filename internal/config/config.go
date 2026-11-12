@@ -88,7 +88,23 @@ type Config struct {
 	// which is expanded, because the hook mode runs from each project's
 	// directory. One process at a time may use it.
 	StateDir string `yaml:"state_dir"`
+
+	// LocalAgent names the agent in the local modes, such as the Claude
+	// Code hook, where no API key tells agents apart.
+	LocalAgent LocalAgent `yaml:"local_agent"`
 }
+
+// LocalAgent is the agent and owner the local modes record calls under.
+type LocalAgent struct {
+	ID      string `yaml:"id"`
+	OwnerID string `yaml:"owner_id"`
+}
+
+// The local agent's names when the config doesn't give them.
+const (
+	DefaultLocalAgentID    = "local"
+	DefaultLocalAgentOwner = "local"
+)
 
 // Owner is an organisation whose agents use the proxy.
 type Owner struct {
@@ -158,14 +174,9 @@ func LoadEnv(path string, lookupEnv LookupEnv) (*Config, error) {
 
 // Parse decodes YAML, applies defaults, resolves secrets and validates.
 func Parse(data []byte, lookupEnv LookupEnv) (*Config, error) {
-	var cfg Config
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true) // reject typos like "rule:" instead of silently ignoring them
-	if err := dec.Decode(&cfg); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil, errors.New("config is empty")
-		}
-		return nil, fmt.Errorf("parse config: %w", err)
+	cfg, err := decode(data)
+	if err != nil {
+		return nil, err
 	}
 
 	if v, ok := lookupEnv(ListenEnv); ok && v != "" {
@@ -180,6 +191,61 @@ func Parse(data []byte, lookupEnv LookupEnv) (*Config, error) {
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
+	}
+	return cfg, nil
+}
+
+// LoadLocal reads and checks a config for the local modes. See ParseLocal.
+func LoadLocal(path string, lookupEnv LookupEnv) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	cfg, err := ParseLocal(data, lookupEnv)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+// ParseLocal is Parse for the local modes, such as the Claude Code hook.
+// They need the policy, a state_dir to keep the audit log and limits
+// between calls, and optionally local_agent. The HTTP server's settings,
+// its secrets among them, are neither read nor checked.
+func ParseLocal(data []byte, lookupEnv LookupEnv) (*Config, error) {
+	cfg, err := decode(data)
+	if err != nil {
+		return nil, err
+	}
+	cfg.applyDefaults()
+	if cfg.LocalAgent.ID == "" {
+		cfg.LocalAgent.ID = DefaultLocalAgentID
+	}
+	if cfg.LocalAgent.OwnerID == "" {
+		cfg.LocalAgent.OwnerID = DefaultLocalAgentOwner
+	}
+	if err := cfg.resolveStateDir(lookupEnv); err != nil {
+		return nil, err
+	}
+	if cfg.StateDir == "" {
+		return nil, errors.New("state_dir is required here, e.g. state_dir: ~/.consequence, so the audit log and limits last from one call to the next")
+	}
+	if _, err := cfg.NewEngine(); err != nil {
+		return nil, fmt.Errorf("policy: %w", err)
+	}
+	return cfg, nil
+}
+
+// decode reads the YAML strictly: unknown fields are errors.
+func decode(data []byte) (*Config, error) {
+	var cfg Config
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true) // reject typos like "rule:" instead of silently ignoring them
+	if err := dec.Decode(&cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("config is empty")
+		}
+		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	return &cfg, nil
 }
