@@ -349,6 +349,26 @@ func (s *Service) Decide(ctx context.Context, id, token string, approve bool) (A
 	if by == "" {
 		return Approval{}, ErrBadToken
 	}
+	return s.decide(ctx, a, by, approve)
+}
+
+// DecideLocally records a decision made at this machine, with no link:
+// by is who made it, such as "local:ada". The caller must have checked
+// that a person is there, as consequenced -approve does by asking on the
+// terminal. Otherwise it follows Decide's rules, audit entry first.
+func (s *Service) DecideLocally(ctx context.Context, id, by string, approve bool) (Approval, error) {
+	if by == "" {
+		return Approval{}, ErrBadToken
+	}
+	a, err := s.repo.GetApproval(ctx, id)
+	if err != nil {
+		return Approval{}, err
+	}
+	return s.decide(ctx, a, by, approve)
+}
+
+func (s *Service) decide(ctx context.Context, a Approval, by string, approve bool) (Approval, error) {
+	id := a.ID
 	now := s.now().UTC()
 	if a.Overdue(now) || a.Status == StatusExpired {
 		return Approval{}, ErrExpired

@@ -186,11 +186,15 @@ func marshalRaw(v any) ([]byte, error) {
 // result with isError, which the agent reads and can react to. Reads have no
 // such result, so they get a JSON-RPC error carrying the same sentence.
 func refuse(w http.ResponseWriter, msg message, call toolCall, text string) {
+	writeJSON(w, http.StatusOK, refusal(msg, call, text))
+}
+
+// refusal is the answer refuse sends, for any transport.
+func refusal(msg message, call toolCall, text string) map[string]any {
 	if call.isTool() {
-		writeJSON(w, http.StatusOK, toolErrorResult(msg.id, call.modern, text))
-		return
+		return toolErrorResult(msg.id, call.modern, text)
 	}
-	writeJSON(w, http.StatusOK, errorResponse(msg.id, codeRefused, text))
+	return errorResponse(msg.id, codeRefused, text)
 }
 
 // toolErrorResult builds a tools/call result with isError true. A result,

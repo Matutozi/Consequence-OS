@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -433,5 +437,110 @@ func TestLogNeedsAStore(t *testing.T) {
 	err := run(context.Background(), []string{"-config", writeTestConfig(t, ""), "-log"}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "needs database_url_env or state_dir") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// buildMock builds cmd/mockmcp, the MCP server the stdio tests wrap.
+func buildMock(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("builds cmd/mockmcp")
+	}
+	bin := filepath.Join(t.TempDir(), "mockmcp")
+	if out, err := exec.Command("go", "build", "-o", bin, "../mockmcp").CombinedOutput(); err != nil {
+		t.Fatalf("build mockmcp: %v\n%s", err, out)
+	}
+	return bin
+}
+
+const stdioPolicy = `
+state_dir: STATE
+local_agent: { id: desktop-agent, owner_id: ada }
+tools: { notes.read: read, payments.refund: irreversible }
+rules:
+  - { name: small-refunds, tool: payments.refund, when: { arg: amount, op: lte, value: 50 }, action: allow }
+  - { name: big-refunds, tool: payments.refund, action: ask }
+`
+
+const modernMeta = `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}`
+
+func refundLine(id, amount int) string {
+	return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"payments.refund","arguments":{"charge_id":"ch_1","amount":%d},%s}}`, id, amount, modernMeta)
+}
+
+// fakeTerminal answers -approve's question.
+type fakeTerminal struct {
+	io.Reader
+	prompt bytes.Buffer
+}
+
+func (f *fakeTerminal) Write(p []byte) (int, error) { return f.prompt.Write(p) }
+func (f *fakeTerminal) Close() error                { return nil }
+
+func TestStdioAndApprove(t *testing.T) {
+	mock := buildMock(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "local.yaml")
+	if err := os.WriteFile(path, []byte(strings.ReplaceAll(stdioPolicy, "STATE", filepath.Join(dir, "state"))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdioRun := func(lines ...string) string {
+		t.Helper()
+		stdin, stderr = strings.NewReader(strings.Join(lines, "\n")+"\n"), &bytes.Buffer{}
+		var out bytes.Buffer
+		if err := run(context.Background(), []string{"-config", path, "-stdio", "--", mock, "-stdio"}, &out); err != nil {
+			t.Fatalf("-stdio: %v\n%s", err, stderr)
+		}
+		return out.String()
+	}
+	t.Cleanup(func() {
+		stdin, stderr, openTerminal = os.Stdin, os.Stderr, func() (io.ReadWriteCloser, error) { return os.OpenFile("/dev/tty", os.O_RDWR, 0) }
+	})
+
+	out := stdioRun(refundLine(1, 20), refundLine(2, 5000))
+	if !strings.Contains(out, "Refunded 20.00 USD") || !strings.Contains(out, "Approval pending") {
+		t.Fatalf("-stdio output:\n%s", out)
+	}
+	m := regexp.MustCompile(`consequenced -approve (apr_[0-9a-f]+) -config `).FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("no approve command in:\n%s", out)
+	}
+	id := m[1]
+
+	approve := func(answer string, extra ...string) (string, error) {
+		term := &fakeTerminal{Reader: strings.NewReader(answer)}
+		openTerminal = func() (io.ReadWriteCloser, error) { return term, nil }
+		var out bytes.Buffer
+		err := run(context.Background(), append([]string{"-config", path, "-approve", id}, extra...), &out)
+		return out.String() + term.prompt.String(), err
+	}
+	// No terminal: refused, whatever stdin says.
+	openTerminal = func() (io.ReadWriteCloser, error) { return nil, errors.New("no tty") }
+	stdin = strings.NewReader("yes\n")
+	if err := run(context.Background(), []string{"-config", path, "-approve", id}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "an agent running commands has no terminal") {
+		t.Errorf("without a terminal: err = %v", err)
+	}
+	if got, err := approve("no\n"); err != nil || !strings.Contains(got, "Nothing decided") || !strings.Contains(got, "payments.refund with amount, charge_id") {
+		t.Errorf("answering no: %q %v", got, err)
+	}
+	if got, err := approve("yes\n"); err != nil || !strings.Contains(got, "Approved "+id) || !strings.Contains(got, "Type yes to approve "+id) {
+		t.Fatalf("answering yes: %q %v", got, err)
+	}
+	if got, _ := approve("yes\n"); !strings.Contains(got, "already approved") {
+		t.Errorf("approving twice: %q", got)
+	}
+
+	// The retry goes through once; a second retry is held again.
+	out = stdioRun(refundLine(3, 5000), refundLine(4, 5000))
+	if strings.Count(out, "Refunded 5000.00 USD") != 1 || !strings.Contains(out, "Approval pending") {
+		t.Errorf("retries:\n%s", out)
+	}
+
+	var logOut bytes.Buffer
+	if err := run(context.Background(), []string{"-config", path, "-hook", "claude-code", "-log"}, &logOut); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logOut.String(), "approved") || !strings.Contains(logOut.String(), "decided by local:") {
+		t.Errorf("log:\n%s", logOut.String())
 	}
 }

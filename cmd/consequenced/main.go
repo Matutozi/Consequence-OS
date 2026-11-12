@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,9 +22,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -31,6 +34,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/approval"
 	"github.com/matutozi/consequence-os/internal/audit"
 	"github.com/matutozi/consequence-os/internal/config"
+	"github.com/matutozi/consequence-os/internal/gate"
 	"github.com/matutozi/consequence-os/internal/hook"
 	"github.com/matutozi/consequence-os/internal/policy"
 	"github.com/matutozi/consequence-os/internal/proxy"
@@ -106,6 +110,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	initName := fs.String("init", "", "set up the hook for this agent (claude-code): write a starter policy and add the hook to its settings")
 	global := fs.Bool("global", false, "with -init: add the hook to ~/.claude/settings.json, for every project, instead of this project's .claude/settings.local.json")
 	yes := fs.Bool("yes", false, "with -init: change the settings without asking")
+	stdioMode := fs.Bool("stdio", false, "wrap a local MCP server: start the command after --, and check every call to it")
+	approveID := fs.String("approve", "", "approve a held call by its ID (apr_...), asking you on the terminal first")
+	reject := fs.Bool("reject", false, "with -approve: reject the call instead")
 	showLog := fs.Bool("log", false, "print recent decisions from the audit log and exit")
 	logCount := fs.Int("n", 20, "with -log: how many decisions to print")
 	if err := fs.Parse(args); err != nil {
@@ -113,7 +120,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 	configSet := false
 	fs.Visit(func(f *flag.Flag) { configSet = configSet || f.Name == "config" })
-	if (*hookName != "" || *initName != "") && !configSet {
+	local := *hookName != "" || *initName != "" || *stdioMode || *approveID != ""
+	if local && !configSet {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return err
@@ -122,6 +130,23 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 	if *initName != "" {
 		return runInit(*initName, *configPath, *global, *yes, out)
+	}
+	if *stdioMode || *approveID != "" {
+		cfg, err := config.LoadLocal(*configPath, os.LookupEnv)
+		if err != nil {
+			return err
+		}
+		approveCmd := func(id string) string {
+			cmd := "consequenced -approve " + id
+			if configSet {
+				cmd += " -config " + hook.ShellQuote(*configPath)
+			}
+			return cmd
+		}
+		if *approveID != "" {
+			return runApprove(ctx, cfg, *approveID, *reject, out)
+		}
+		return runStdio(ctx, cfg, fs.Args(), approveCmd, out)
 	}
 	if *hookName != "" {
 		if *auditHead != "" {
@@ -250,6 +275,152 @@ func runInit(name, configPath string, global, yes bool, out io.Writer) error {
 		"  - Restart Claude Code so it loads the hook.\n"+
 		"  - See its decisions:        consequenced -hook claude-code -log%[1]s\n"+
 		"  - Change the rules in %[2]s, then check them: consequenced -hook claude-code -check%[1]s\n", flagConfig, configPath)
+	return nil
+}
+
+// runStdio wraps the MCP server command, checking every call to it.
+func runStdio(ctx context.Context, cfg *config.Config, command []string, approveCmd func(string) string, out io.Writer) error {
+	engine, err := cfg.NewEngine()
+	if err != nil {
+		return err
+	}
+	env, err := cfg.StdioEnvironment(os.LookupEnv)
+	if err != nil {
+		return err
+	}
+	// The log and the server's own stderr share ours, from different
+	// goroutines, so writes take turns. MCP clients keep a server's stderr
+	// as its log.
+	errOut := &lockedWriter{w: stderr}
+	log := slog.New(slog.NewTextHandler(errOut, nil))
+	for _, w := range engine.Warnings() {
+		log.Warn("policy: " + w)
+	}
+	return proxy.RunStdio(ctx, stdin, out, proxy.StdioOptions{
+		Command: command, Env: env, Stderr: errOut,
+		AgentID: cfg.LocalAgent.ID, OwnerID: cfg.LocalAgent.OwnerID,
+		Open:           localGate(cfg, engine, log),
+		ApproveCommand: approveCmd,
+		Log:            log,
+	})
+}
+
+// lockedWriter lets several goroutines write to one writer, a write at a time.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// localGate opens the gate for one call in a local mode: the file store,
+// and approvals decided with consequenced -approve.
+func localGate(cfg *config.Config, engine *policy.Engine, log *slog.Logger) func(context.Context) (*gate.Gate, *approval.Service, func(), error) {
+	return func(context.Context) (*gate.Gate, *approval.Service, func(), error) {
+		st, err := store.OpenFile(cfg.StateDir, store.FileOptions{Log: log, LockTimeout: hook.DefaultLockTimeout})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		svc := localApprovals(cfg, st, log)
+		g, err := gate.New(gate.Options{Engine: engine, Store: st, Approvals: svc, Log: log})
+		if err != nil {
+			st.Close()
+			return nil, nil, nil, err
+		}
+		return g, svc, st.Close, nil // File.Close is safe to call twice
+	}
+}
+
+// localApprovals is the approval service of the local modes: nobody is
+// emailed, and the person decides with consequenced -approve.
+func localApprovals(cfg *config.Config, st store.Store, log *slog.Logger) *approval.Service {
+	return approval.NewService(approval.Options{
+		Repo: st, Audit: st,
+		Approvers:  map[string][]string{cfg.LocalAgent.OwnerID: {localUser()}},
+		Validity:   cfg.ApprovalValidity,
+		Timeout:    cfg.ApprovalTimeout,
+		MaxPending: cfg.MaxPendingApprovals,
+		Notifier:   approval.NoNotifier{},
+		Log:        log,
+	})
+}
+
+// localUser names the person at this machine in approval decisions.
+func localUser() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return "local:" + u.Username
+	}
+	if name := os.Getenv("USER"); name != "" {
+		return "local:" + name
+	}
+	return "local:unknown"
+}
+
+// openTerminal opens the terminal the person is sitting at. A variable so
+// tests can stand in for it.
+var openTerminal = func() (io.ReadWriteCloser, error) { return os.OpenFile("/dev/tty", os.O_RDWR, 0) }
+
+// runApprove decides a held call from the local store. It shows the call,
+// then asks on the terminal itself rather than stdin: a process with no
+// terminal, such as an agent's shell tool, can't answer, so an agent can't
+// approve its own calls.
+func runApprove(ctx context.Context, cfg *config.Config, id string, reject bool, out io.Writer) error {
+	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	st, err := store.OpenFile(cfg.StateDir, store.FileOptions{Log: log, LockTimeout: hook.DefaultLockTimeout})
+	if err != nil {
+		return err
+	}
+	a, err := st.GetApproval(ctx, id)
+	st.Close() // not held while the person reads and answers
+	if err != nil {
+		return fmt.Errorf("%s: %w", id, err)
+	}
+	fmt.Fprintf(out, "%s: %s\n  rule:      %s\n  score:     %d of 100\n", a.ID, a.Summary, a.Rule, a.Score)
+	for _, r := range a.Reasons {
+		fmt.Fprintf(out, "  because:   %s\n", r)
+	}
+	if len(a.Arguments) > 0 {
+		fmt.Fprintf(out, "  arguments: %s\n", a.Arguments)
+	}
+	fmt.Fprintf(out, "  asked at:  %s\n", a.CreatedAt.Local().Format("2006-01-02 15:04:05"))
+	if a.Status != approval.StatusPending {
+		fmt.Fprintf(out, "It is already %s, so there is nothing to decide.\n", a.Status)
+		return nil
+	}
+
+	term, err := openTerminal()
+	if err != nil {
+		return errors.New("-approve asks you on the terminal, and there is none here. That's on purpose: an agent running commands has no terminal, so it can't approve its own calls. Run it yourself, in a terminal")
+	}
+	defer term.Close()
+	verb := "approve"
+	if reject {
+		verb = "reject"
+	}
+	fmt.Fprintf(term, "Type yes to %s %s: ", verb, a.ID)
+	answer, _ := bufio.NewReader(term).ReadString('\n')
+	if strings.TrimSpace(answer) != "yes" {
+		fmt.Fprintln(out, "Nothing decided.")
+		return nil
+	}
+
+	st, err = store.OpenFile(cfg.StateDir, store.FileOptions{Log: log, LockTimeout: hook.DefaultLockTimeout})
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if _, err := localApprovals(cfg, st, log).DecideLocally(ctx, a.ID, localUser(), !reject); err != nil {
+		return fmt.Errorf("%s: %w", a.ID, err)
+	}
+	if reject {
+		fmt.Fprintf(out, "Rejected %s.\n", a.ID)
+		return nil
+	}
+	fmt.Fprintf(out, "Approved %s. The agent's retry of this exact call goes through once, within %s.\n", a.ID, approval.HumanDuration(cfg.ApprovalValidity))
 	return nil
 }
 
