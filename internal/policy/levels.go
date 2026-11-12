@@ -25,16 +25,18 @@ func (l Level) Valid() bool {
 	return false
 }
 
-// Resource reads and prompt fetches go past the policy under these names:
-// "resource:" plus the URI, and "prompt:" plus the prompt's name. They're
+// Resource reads, prompt fetches and requests from the server go past the
+// policy under these names: "resource:" plus the URI, "prompt:" plus the
+// prompt's name, and "server:" plus what the server asks for. They're
 // defined in package consequence, which also treats them as reads.
 const (
 	ResourcePrefix = consequence.ResourcePrefix
 	PromptPrefix   = consequence.PromptPrefix
+	ServerPrefix   = consequence.ServerPrefix
 )
 
-// IsRead reports whether name is a resource read or a prompt fetch rather
-// than a tool call.
+// IsRead reports whether name is anything but a tool call: a resource
+// read, a prompt fetch or a request from the server.
 func IsRead(name string) bool { return consequence.IsRead(name) }
 
 // Reversibility says how the consequence package names a level.
@@ -64,8 +66,8 @@ func LevelOf(r consequence.Reversibility) Level {
 type Levels map[string]Level
 
 // For returns the level of a tool. Unknown tools are treated as
-// irreversible. Unlisted resources and prompts are reads: they change
-// nothing, so by default they're allowed, but still audited.
+// irreversible. Unlisted resources, prompts and server requests are reads:
+// they change nothing, so by default they're allowed, but still audited.
 func (l Levels) For(tool string) Level {
 	if level, ok := l[tool]; ok {
 		return level

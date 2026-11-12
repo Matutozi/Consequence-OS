@@ -71,7 +71,12 @@ type Proxy struct {
 	agents    map[[32]byte]config.Agent // keyed by sha256 of the API key
 	origins   map[string]bool
 	pinning   bool // tool listings are checked; see listing.go
-	rp        *httputil.ReverseProxy
+	tools     *toolpin.Service
+	// upstreamToken is the upstream's credential, scrubbed from answers;
+	// see redact.go.
+	upstreamToken string
+	client        *http.Client // answers the server's refused requests; see response.go
+	rp            *httputil.ReverseProxy
 }
 
 // New builds a Proxy.
@@ -99,6 +104,10 @@ func New(opts Options) (*Proxy, error) {
 		agents:    make(map[[32]byte]config.Agent, len(opts.Agents)),
 		origins:   make(map[string]bool, len(opts.AllowedOrigins)),
 		pinning:   opts.Tools != nil,
+		tools:     opts.Tools,
+
+		upstreamToken: opts.UpstreamAuth,
+		client:        &http.Client{Timeout: 10 * time.Second},
 	}
 	for _, a := range opts.Agents {
 		// Looking agents up by a hash of the key means we never compare raw
@@ -108,7 +117,7 @@ func New(opts Options) (*Proxy, error) {
 	for _, o := range opts.AllowedOrigins {
 		p.origins[strings.TrimSuffix(o, "/")] = true
 	}
-	p.rp = newReverseProxy(upstream, opts.UpstreamAuth, opts.Tools, p.log)
+	p.rp = newReverseProxy(upstream, opts.UpstreamAuth, p.checkResponse, p.log)
 	return p, nil
 }
 
@@ -127,7 +136,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		p.forward(w, r, nil) // e.g. GET streams or DELETE for legacy sessions
+		// e.g. GET streams, on which the server may send requests too, or
+		// DELETE for legacy sessions.
+		r = r.WithContext(context.WithValue(r.Context(), forwardedKey{}, forwarded{agent: agent}))
+		p.forward(w, r, nil)
 		return
 	}
 
@@ -141,6 +153,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, rerr.status, errorResponse(nil, rerr.code, rerr.message))
 		return
 	}
+	// The answer is checked on its way back; see response.go.
+	r = r.WithContext(context.WithValue(r.Context(), forwardedKey{}, forwarded{agent: agent, method: msg.method, id: msg.id}))
 	if !gated(msg.method) {
 		if rerr := checkHeaders(r.Header, msg, nil); rerr != nil {
 			writeJSON(w, rerr.status, errorResponse(msg.id, rerr.code, rerr.message))
@@ -328,20 +342,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte) {
 
 // newReverseProxy uses the standard library's reverse proxy, which already
 // handles hop-by-hop headers and streaming responses such as SSE. token,
-// when set, is the upstream's credential; see redact.go.
-// tools, when set, checks tools/list answers; see listing.go.
-func newReverseProxy(upstream *url.URL, token string, tools *toolpin.Service, log *slog.Logger) *httputil.ReverseProxy {
-	modify := func(resp *http.Response) error {
-		if token != "" {
-			redactHeaders(resp.Header, token)
-			resp.Body = newRedactor(resp.Body, token)
-		}
-		// After the redactor, so the token can't end up in a pin.
-		if l, ok := resp.Request.Context().Value(listingKey{}).(listing); ok && tools != nil {
-			return checkListingResponse(resp, tools, l, log)
-		}
-		return nil
-	}
+// when set, is the upstream's credential; see redact.go. modify checks
+// each answer; see response.go.
+func newReverseProxy(upstream *url.URL, token string, modify func(*http.Response) error, log *slog.Logger) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			// Point at the upstream's own path. (SetURL would append ours to it.)
@@ -355,12 +358,10 @@ func newReverseProxy(upstream *url.URL, token string, tools *toolpin.Service, lo
 			if token != "" {
 				pr.Out.Header.Set("Authorization", "Bearer "+token)
 			}
-			if _, isListing := pr.In.Context().Value(listingKey{}).(listing); token != "" || isListing {
-				// Without the agent's Accept-Encoding, Go's transport asks
-				// for gzip itself and decompresses the reply, so the token
-				// can be scrubbed from it and a listing read.
-				pr.Out.Header.Del("Accept-Encoding")
-			}
+			// Without the agent's Accept-Encoding, Go's transport asks for
+			// gzip itself and decompresses the reply, so it can be read:
+			// to scrub the token from it, and to check it (response.go).
+			pr.Out.Header.Del("Accept-Encoding")
 			// Only ConsequenceOS attaches receipts: drop any the agent sent,
 			// then add ours if this call has one.
 			pr.Out.Header.Del(headerReceipt)
@@ -375,10 +376,14 @@ func newReverseProxy(upstream *url.URL, token string, tools *toolpin.Service, lo
 			if errors.Is(err, context.Canceled) {
 				return // the agent hung up; nobody to answer
 			}
-			if errors.Is(err, errUncheckedListing) {
-				log.Error("tool list not passed on", "err", err)
-				l, _ := r.Context().Value(listingKey{}).(listing)
-				writeJSON(w, http.StatusServiceUnavailable, errorResponse(l.id, codeInternalError, errUncheckedListing.Error()))
+			if errors.Is(err, errUncheckedListing) || errors.Is(err, errUnchecked) {
+				log.Error("answer not passed on", "err", err)
+				fw, _ := r.Context().Value(forwardedKey{}).(forwarded)
+				what := errUnchecked
+				if errors.Is(err, errUncheckedListing) {
+					what = errUncheckedListing
+				}
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse(fw.id, codeInternalError, what.Error()))
 				return
 			}
 			log.Error("upstream request failed", "err", err)

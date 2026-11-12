@@ -35,6 +35,7 @@ To try it without touching your own setup first, run `./scripts/demo-personal.sh
 | Read or write `.env` files, SSH keys, cloud credentials | Blocked, and Claude is told why |
 | Change Claude Code's settings, or ConsequenceOS's own policy and log | Blocked |
 | Use an MCP tool you haven't listed | Asks you |
+| An MCP server wrapped with `-stdio` asks you for a password, key or seed phrase | Blocked: the server is told you declined |
 
 Tests and builds ask because they run code the agent can edit. If you trust that, allow them.
 

@@ -8,10 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
-	"mime"
-	"net/http"
-	"strconv"
 
 	"github.com/matutozi/consequence-os/internal/toolpin"
 	"github.com/matutozi/consequence-os/pkg/verify"
@@ -25,10 +21,10 @@ import (
 
 const methodToolsList = "tools/list"
 
-// maxListingBytes bounds a tools/list answer, or one SSE event of it,
-// that we read whole. Listings with many tools and long schemas run
-// larger than calls.
-const maxListingBytes = 16 << 20 // 16 MiB
+// maxCheckedBytes bounds an answer from the server, or one SSE event of
+// it, that is read whole to be checked. Listings with many tools and long
+// schemas run larger than calls.
+const maxCheckedBytes = 16 << 20 // 16 MiB
 
 // listing is a tools/list request on its way to the upstream: its ID, for
 // an error answer, and who asked.
@@ -101,63 +97,15 @@ func listingID(id json.RawMessage) (string, bool) {
 	return string(c), true
 }
 
-// checkListingResponse is the reverse proxy's ModifyResponse step for a
-// forwarded tools/list. A JSON answer is read whole and filtered; an SSE
-// stream is filtered an event at a time, so other events still arrive
-// as they come. Anything we can't read fails: the listing never reaches
-// the agent unchecked.
-func checkListingResponse(resp *http.Response, tools *toolpin.Service, l listing, log *slog.Logger) error {
-	if resp.StatusCode != http.StatusOK {
-		return nil // no result to list tools in
-	}
-	if enc := resp.Header.Get("Content-Encoding"); enc != "" && enc != "identity" {
-		return fmt.Errorf("%w: it came compressed (%s)", errUncheckedListing, enc)
-	}
-	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	ctx := resp.Request.Context()
-	switch mediaType {
-	case "application/json":
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxListingBytes+1))
-		_ = resp.Body.Close()
-		if err != nil {
-			return err
-		}
-		if len(body) > maxListingBytes {
-			return fmt.Errorf("%w: it is over %d bytes", errUncheckedListing, maxListingBytes)
-		}
-		out, err := filterListing(ctx, tools, l.by, body)
-		if err != nil {
-			return err
-		}
-		resp.Body = io.NopCloser(bytes.NewReader(out))
-		resp.ContentLength = int64(len(out))
-		resp.Header.Set("Content-Length", strconv.Itoa(len(out)))
-		return nil
-	case "text/event-stream":
-		resp.Body = &sseFilter{src: resp.Body, br: bufio.NewReader(resp.Body), filter: func(data []byte) ([]byte, error) {
-			out, err := filterListing(ctx, tools, l.by, data)
-			if err != nil {
-				// The stream stops here, so the agent never gets the listing.
-				log.Error("tool list not passed on; the event stream was cut off", "err", err)
-			}
-			return out, err
-		}}
-		resp.ContentLength = -1
-		resp.Header.Del("Content-Length")
-		return nil
-	default:
-		return fmt.Errorf("%w: its content type %q is neither JSON nor an event stream", errUncheckedListing, mediaType)
-	}
-}
-
 // sseFilter passes an SSE stream through an event at a time, rewriting
-// the data of each event with filter. An event's lines other than data
-// (id, event, retry, comments) are kept, in order; its data goes where the
-// first data line was, a data line for each line of it.
+// the data of each event with filter, or dropping the event when filter
+// says not to keep it. An event's lines other than data (id, event, retry,
+// comments) are kept, in order; its data goes where the first data line
+// was, a data line for each line of it.
 type sseFilter struct {
 	src    io.ReadCloser
 	br     *bufio.Reader
-	filter func(data []byte) ([]byte, error)
+	filter func(data []byte) (out []byte, keep bool, err error)
 	out    bytes.Buffer // filtered bytes not yet read
 	err    error        // returned once out is drained
 }
@@ -183,7 +131,7 @@ func (f *sseFilter) nextEvent() error {
 	firstData := -1
 	size := 0
 	for {
-		line, err := readSSELine(f.br, maxListingBytes-size)
+		line, err := readSSELine(f.br, maxCheckedBytes-size)
 		if err != nil {
 			if errors.Is(err, io.EOF) && len(line) == 0 && len(lines) == 0 {
 				return io.EOF
@@ -216,9 +164,12 @@ func (f *sseFilter) nextEvent() error {
 		lines = append(lines, line)
 	}
 	if firstData >= 0 {
-		filtered, err := f.filter(bytes.Join(data, []byte("\n")))
+		filtered, keep, err := f.filter(bytes.Join(data, []byte("\n")))
 		if err != nil {
 			return err
+		}
+		if !keep {
+			return nil // dropped whole, with its id and event lines
 		}
 		var d bytes.Buffer
 		for i, part := range bytes.Split(filtered, []byte("\n")) {
@@ -257,7 +208,7 @@ func readSSELine(br *bufio.Reader, max int) ([]byte, error) {
 			return line, nil
 		}
 		if len(line) >= max {
-			return nil, fmt.Errorf("%w: an event is over %d bytes", errUncheckedListing, maxListingBytes)
+			return nil, fmt.Errorf("%w: an event is over %d bytes", errUncheckedListing, maxCheckedBytes)
 		}
 		line = append(line, b)
 	}

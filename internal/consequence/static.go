@@ -30,6 +30,9 @@ func (s Static) Assess(_ context.Context, tool string, _ map[string]any) (Assess
 	switch {
 	case listed:
 		reason = fmt.Sprintf("%s is listed as %s in the tools map.", tool, describe(r))
+	case IsServerRequest(tool):
+		r = Read
+		reason = "Requests from the server that aren't in the tools map count as reads: the client shows them to the user."
 	case IsRead(tool):
 		r = Read
 		reason = "Resources and prompts that aren't in the tools map count as reads."

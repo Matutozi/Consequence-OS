@@ -205,7 +205,7 @@ func readInput(in io.Reader) (input, map[string]any, error) {
 	case call.ToolName == "":
 		return input{}, nil, block("the call names no tool")
 	case policy.IsRead(call.ToolName):
-		return input{}, nil, block("tool names may not start with resource: or prompt:")
+		return input{}, nil, block("tool names may not start with resource:, prompt: or server:")
 	case call.Cwd == "":
 		return input{}, nil, block("the call has no working directory")
 	}
