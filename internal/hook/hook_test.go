@@ -339,3 +339,34 @@ func TestWarnings(t *testing.T) {
 		t.Errorf("warnings = %q", w)
 	}
 }
+
+func TestProjectInALinkedFolder(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real-project")
+	if err := os.MkdirAll(filepath.Join(real, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(root, "code")
+	if err := os.Symlink(real, linked); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(real, "sub"), filepath.Join(real, "inner-link")); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		path            string
+		wantVia, wantIn bool
+	}{
+		{filepath.Join(linked, "main.go"), false, true},           // the project is reached through a link the person made
+		{filepath.Join(linked, "sub", "new.go"), false, true},     // a new file
+		{filepath.Join(linked, "inner-link", "x.go"), true, true}, // a link inside the project counts
+		{filepath.Join(root, "elsewhere.txt"), false, false},
+	}
+	for _, tt := range tests {
+		args := map[string]any{"file_path": tt.path}
+		derive("Write", args, linked, linked)
+		if args[ArgViaSymlink] != tt.wantVia || args[ArgInProject] != tt.wantIn {
+			t.Errorf("%s: via_symlink %v in_project %v, want %v %v", tt.path, args[ArgViaSymlink], args[ArgInProject], tt.wantVia, tt.wantIn)
+		}
+	}
+}
