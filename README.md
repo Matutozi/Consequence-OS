@@ -275,6 +275,7 @@ Reading is the first half of most data leaks, so `resources/read` and `prompts/g
   action: ask
 ```
 
+- **Numbers in prompt arguments:** MCP sends prompt arguments as text, so for prompts only, `gt`, `gte`, `lt` and `lte` read a number written as text. Other operators compare the text as sent, so `{ op: eq, value: "5" }` matches `"5"`. As with argument names, the two kinds of rule read it differently. An allow rule needs a plain decimal, like `5000` or `-12.5`: anything else doesn't match, and the call falls through. A deny or ask rule also reads what a server's parser might: surrounding spaces, a `+`, underscores, an exponent, hex, and digits from other scripts, such as `٥٠٠٠`, which Python's `int` reads. So `" 5e3"` can't get past a deny on `> 1000`. Tool arguments keep their JSON types: a number sent as text there doesn't match.
 - **Unlisted reads are allowed,** because they count as level `read`. Upgrading changes nothing until you write a rule, but every read is now audited and can be denied, held or limited. A catch-all `*` rule does cover reads, so put a `resource:*` allow above it if you want reads open.
 - **Allowed reads carry no receipt.** Receipts are for actions, and receivers check only `tools/call`.
 - **A refused read is a JSON-RPC error** with code `-32030` and the same sentence a tool call would get, because reads have no error result of their own.

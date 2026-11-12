@@ -186,11 +186,15 @@ func validateRule(r *Rule) error {
 // invalid or usage couldn't be counted; the caller must not forward the call.
 func (e *Engine) Decide(ctx context.Context, c Call, usage UsageCounter) (Decision, error) {
 	if c.Consequence.IsZero() {
+		// Assessed on the arguments as sent, before prompt text is wrapped.
 		c.Consequence, _ = e.static.Assess(ctx, c.Tool, c.Args) // Static never fails
 	} else if err := c.Consequence.Validate(); err != nil {
 		return Decision{}, err
 	}
 	d := Decision{Level: LevelOf(c.Consequence.Reversibility), Consequence: c.Consequence}
+	if IsPrompt(c.Tool) {
+		c.Args = promptArgs(c.Args) // see prompt.go
+	}
 	for i := range e.rules {
 		matched, err := e.rules[i].matches(ctx, c, usage)
 		if err != nil {
@@ -251,6 +255,9 @@ func (e *Engine) UsageScopes(tool string) []string {
 // Negative values are kept as 0, so no call can lower a total.
 func (e *Engine) UsageRecords(c Call) []UsageRecord {
 	scopes := e.UsageScopes(c.Tool)
+	if IsPrompt(c.Tool) {
+		c.Args = promptArgs(c.Args) // counted as Decide read them; see prompt.go
+	}
 	records := make([]UsageRecord, 0, len(scopes))
 	for _, scope := range scopes {
 		u := UsageRecord{AgentID: c.AgentID, Tool: scope, At: c.At}
