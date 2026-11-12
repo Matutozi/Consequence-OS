@@ -32,8 +32,11 @@ type Options struct {
 	Engine *policy.Engine
 	// Resolver assesses each call's consequence before the policy decides.
 	// nil means the engine's own, built from the tools map.
-	Resolver  consequence.Resolver
-	Store     store.Store
+	Resolver consequence.Resolver
+	Store    store.Store
+	// Approvals holds asked calls for a human to approve by link. nil
+	// means there is no approval service: the person is at the keyboard,
+	// and an asked call comes back AskUser for the adapter to ask them.
 	Approvals *approval.Service
 	Log       *slog.Logger
 	Now       func() time.Time // nil means time.Now; tests pass a fixed clock
@@ -60,8 +63,8 @@ func New(opts Options) (*Gate, error) {
 		log:       opts.Log,
 		now:       opts.Now,
 	}
-	if g.engine == nil || g.store == nil || g.approvals == nil || g.log == nil {
-		return nil, fmt.Errorf("gate: Engine, Store, Approvals and Log are required")
+	if g.engine == nil || g.store == nil || g.log == nil {
+		return nil, fmt.Errorf("gate: Engine, Store and Log are required")
 	}
 	if g.now == nil {
 		g.now = time.Now
@@ -96,14 +99,20 @@ const (
 	// TooManyPending: the policy asks, but the agent already has as many
 	// requests waiting as allowed, so no new one was opened.
 	TooManyPending
+	// AskUser: the policy asks and the gate has no approval service. The
+	// adapter calls Result.Admit, then asks the person at the keyboard.
+	// The call counts towards limits whatever they answer, since the gate
+	// never learns it: limits over-count rather than under-count.
+	AskUser
 )
 
-// Result is a decided call. Every verdict except Allowed is already in the
-// audit log when Decide returns.
+// Result is a decided call. Every verdict except Allowed and AskUser is
+// already in the audit log when Decide returns.
 type Result struct {
 	Verdict  Verdict
 	Decision policy.Decision
-	// Entry is the audit entry written, or for Allowed the one Admit writes.
+	// Entry is the audit entry written, or for Allowed and AskUser the one
+	// Admit writes. An adapter may set its Detail before calling Admit.
 	Entry audit.Entry
 	// Approval is set when the policy asked: the request that is held,
 	// declined or was approved. ApprovedBy names who approved it.
@@ -186,6 +195,10 @@ func (g *Gate) Decide(ctx context.Context, req Request) (*Result, error) {
 		res.finish(ctx, Denied, audit.OutcomeBlocked, "")
 		return res, nil
 	default: // ActionAsk
+		if g.approvals == nil {
+			res.Verdict = AskUser
+			return res, nil
+		}
 		if err := g.ask(ctx, req, res); err != nil {
 			release()
 			return nil, err
@@ -247,13 +260,19 @@ func (r *Result) finish(ctx context.Context, v Verdict, outcome audit.Outcome, d
 // Admit records an allowed call before the adapter lets it go ahead: it
 // counts the call towards every limit that covers it, writes the audit
 // entry as forwarded, and frees the call's limit locks. receiptID names the
-// receipt the adapter will attach, or is empty.
+// receipt the adapter will attach, or is empty. For AskUser it does the
+// same, with the outcome asked_user.
 //
 // On an error the call must not go ahead. Usage is counted first, so a
 // failed audit write over-counts the call (the safe way round) rather than
 // letting it through uncounted.
 func (r *Result) Admit(ctx context.Context, receiptID string) error {
-	if r.Verdict != Allowed {
+	outcome := audit.OutcomeForwarded
+	switch r.Verdict {
+	case Allowed:
+	case AskUser:
+		outcome = audit.OutcomeAskedUser
+	default:
 		return fmt.Errorf("gate: Admit called on a call that is not allowed")
 	}
 	for _, u := range r.g.engine.UsageRecords(r.call) {
@@ -262,7 +281,7 @@ func (r *Result) Admit(ctx context.Context, receiptID string) error {
 			return &Error{What: "usage log unavailable", Err: err}
 		}
 	}
-	r.Entry.Outcome = audit.OutcomeForwarded
+	r.Entry.Outcome = outcome
 	r.Entry.ReceiptID = receiptID
 	if err := r.g.Record(ctx, r.Entry); err != nil {
 		return &Error{What: "audit log unavailable", Err: err}

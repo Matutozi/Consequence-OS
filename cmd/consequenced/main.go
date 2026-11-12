@@ -29,6 +29,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/approval"
 	"github.com/matutozi/consequence-os/internal/audit"
 	"github.com/matutozi/consequence-os/internal/config"
+	"github.com/matutozi/consequence-os/internal/hook"
 	"github.com/matutozi/consequence-os/internal/policy"
 	"github.com/matutozi/consequence-os/internal/proxy"
 	"github.com/matutozi/consequence-os/internal/receipt"
@@ -47,11 +48,45 @@ func main() {
 
 	// Keeping the real work in run() makes it easy to return errors instead
 	// of calling os.Exit from deep inside the program.
-	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
+	err := run(ctx, os.Args[1:], os.Stdout)
+	var code exitCode
+	switch {
+	case errors.As(err, &code):
+		os.Exit(int(code)) // the hook has already written its answer
+	case err != nil && hookMode(os.Args[1:]):
+		// Claude Code lets the call run on any exit code but 2, so even a
+		// mistyped flag in the hook's command must block.
+		fmt.Fprintln(os.Stderr, "ConsequenceOS blocked this call:", err)
+		os.Exit(hook.ExitBlock)
+	case err != nil:
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
+
+// exitCode is returned by run when the process must exit with that code.
+type exitCode int
+
+func (c exitCode) Error() string { return fmt.Sprintf("exit status %d", int(c)) }
+
+// hookMode reports whether the arguments ask for a hook.
+func hookMode(args []string) bool {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			continue // a flag's value
+		}
+		if a = strings.TrimLeft(a, "-"); a == "hook" || strings.HasPrefix(a, "hook=") {
+			return true
+		}
+	}
+	return false
+}
+
+// stdin and stderr are variables so tests can stand in for them.
+var (
+	stdin  io.Reader = os.Stdin
+	stderr io.Writer = os.Stderr
+)
 
 func run(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("consequenced", flag.ContinueOnError)
@@ -65,8 +100,15 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	verifyAudit := fs.Bool("verify-audit", false, "check the stored audit log's hash chain and exit; fails if it was tampered with")
 	auditHead := fs.String("audit-head", "", "with -verify-audit: a signed head saved from GET /v1/audit/head; the log must still contain it")
+	hookName := fs.String("hook", "", "run as a hook for this agent (claude-code): read one tool call on stdin, answer on stdout, exit 2 to block")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *hookName != "" {
+		if *auditHead != "" {
+			return errors.New("-audit-head needs the server's config: the hook has no signing keys")
+		}
+		return runHook(ctx, *hookName, *configPath, *check, *verifyAudit, out)
 	}
 	if *showVersion {
 		fmt.Fprintln(out, "consequenced", version)
@@ -96,6 +138,42 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return nil
 	}
 	return serve(ctx, cfg, engine)
+}
+
+// runHook answers one Claude Code tool call. With check, it checks the
+// hook's config and prints a summary instead; with verifyAudit, it checks
+// the hook's audit log.
+func runHook(ctx context.Context, name, configPath string, check, verifyAudit bool, out io.Writer) error {
+	if name != "claude-code" {
+		return fmt.Errorf("-hook %q: the only hook is claude-code", name)
+	}
+	if verifyAudit {
+		cfg, err := config.LoadLocal(configPath, os.LookupEnv)
+		if err != nil {
+			return err
+		}
+		return checkAuditChain(ctx, out, cfg, "")
+	}
+	if check {
+		cfg, err := config.LoadLocal(configPath, os.LookupEnv)
+		if err != nil {
+			return err
+		}
+		engine, err := cfg.NewEngine()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "config OK for the Claude Code hook\n  state_dir:         %s\n  agent:             %s (owner %s)\n",
+			cfg.StateDir, cfg.LocalAgent.ID, cfg.LocalAgent.OwnerID)
+		printPolicy(out, cfg)
+		printWarningList(out, append(engine.Warnings(), hook.Warnings(cfg.Rules)...))
+		return nil
+	}
+	code := hook.Run(ctx, stdin, out, stderr, hook.Options{ConfigPath: configPath, LookupEnv: os.LookupEnv})
+	if code != hook.ExitOK {
+		return exitCode(code)
+	}
+	return nil
 }
 
 // withListen returns the process environment, with -listen (when given)
@@ -408,6 +486,11 @@ func printSummary(out io.Writer, cfg *config.Config) {
 		fmt.Fprintf(out, "    - %s (key from $%s)\n", r.ID, r.APIKeyEnv)
 	}
 
+	printPolicy(out, cfg)
+}
+
+// printPolicy prints the tools map, the rules and the default.
+func printPolicy(out io.Writer, cfg *config.Config) {
 	// Map iteration order is random in Go, so sort for stable output.
 	tools := make([]string, 0, len(cfg.Tools))
 	for name := range cfg.Tools {
@@ -430,7 +513,10 @@ func printSummary(out io.Writer, cfg *config.Config) {
 // printWarnings lists rules that are valid but may let through more than
 // intended. They don't make -check fail: the config is still usable.
 func printWarnings(out io.Writer, cfg *config.Config, engine *policy.Engine) {
-	warnings := append(cfg.Warnings(), engine.Warnings()...)
+	printWarningList(out, append(cfg.Warnings(), engine.Warnings()...))
+}
+
+func printWarningList(out io.Writer, warnings []string) {
 	if len(warnings) == 0 {
 		return
 	}

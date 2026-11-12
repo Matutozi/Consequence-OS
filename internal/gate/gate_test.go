@@ -49,6 +49,7 @@ type options struct {
 	store      store.Store
 	resolver   consequence.Resolver
 	maxPending int
+	local      bool // no approval service, as in the hook mode
 }
 
 func defaultRules() []policy.Rule {
@@ -78,10 +79,14 @@ func newFixture(t *testing.T, o options) fixture {
 		Approvers: map[string][]string{"acme": {"ada@acme.example"}},
 		Log:       slog.New(slog.NewTextHandler(approvalLog, nil)), Now: now,
 	})
-	g, err := New(Options{
+	opts := Options{
 		Engine: engine, Resolver: o.resolver, Store: o.store, Approvals: svc,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: now,
-	})
+	}
+	if o.local {
+		opts.Approvals = nil
+	}
+	g, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,5 +358,32 @@ func TestSummarize(t *testing.T) {
 	}
 	if got := Summarize("notes.read", nil); got != "notes.read with no arguments" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestAskUserWithoutApprovals(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, options{local: true, rules: []policy.Rule{
+		{Name: "refund-total", Tool: "payments.refund", Limit: &policy.Limit{Sum: "amount", Max: 100, Per: time.Hour}, Action: policy.ActionDeny},
+		{Name: "refunds-ask", Tool: "payments.refund", Action: policy.ActionAsk},
+	}})
+	res := f.decide(t, request("payments.refund", `{"amount":80}`))
+	if res.Verdict != AskUser || res.Approval.ID != "" {
+		t.Fatalf("verdict %d approval %q, want AskUser and no approval", res.Verdict, res.Approval.ID)
+	}
+	if entries := f.audit(t); len(entries) != 0 {
+		t.Fatalf("recorded before Admit: %+v", entries)
+	}
+	res.Entry.Detail = "asked in Claude Code"
+	if err := res.Admit(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	entries := f.audit(t)
+	if len(entries) != 1 || entries[0].Outcome != audit.OutcomeAskedUser || entries[0].Detail != "asked in Claude Code" {
+		t.Fatalf("audit = %+v", entries)
+	}
+	// Whatever the person answered, the 80 counts: the next 80 goes over the limit.
+	if got := f.decide(t, request("payments.refund", `{"amount":80}`)); got.Verdict != Denied || got.Decision.Rule != "refund-total" {
+		t.Errorf("second call: verdict %d rule %q, want denied by the limit", got.Verdict, got.Decision.Rule)
 	}
 }

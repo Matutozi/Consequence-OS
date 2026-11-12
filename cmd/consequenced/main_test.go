@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -248,5 +249,120 @@ func TestStateDir(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "audit chain intact: 2 entries checked") {
 		t.Errorf("got %s", out.String())
+	}
+}
+
+const hookPolicy = `
+state_dir: STATE
+tools: { Bash: irreversible }
+rules:
+  - name: no-force-push
+    tool: Bash
+    when: { arg: command, op: like, value: "git push --force*" }
+    action: deny
+  - name: anything-in-bash
+    tool: Bash
+    action: allow
+`
+
+func writeHookConfig(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude-code.yaml")
+	cfg := strings.ReplaceAll(hookPolicy, "STATE", filepath.Join(dir, "state"))
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestHook(t *testing.T) {
+	path := writeHookConfig(t)
+	call := func(command string) string {
+		return `{"hook_event_name":"PreToolUse","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"` + command + `"}}`
+	}
+	tests := []struct {
+		name, stdin string
+		args        []string
+		wantCode    int // 0 means run returned nil
+		wantOut     string
+	}{
+		{"deny", call("git push --force"), nil, 0, `"permissionDecision":"deny"`},
+		{"allow says nothing", call("git status"), nil, 0, ""},
+		{"bad input blocks", "nonsense", nil, 2, ""},
+		{"unknown hook", call("ls"), []string{"-hook", "cursor"}, -1, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdin, stderr = strings.NewReader(tt.stdin), &bytes.Buffer{}
+			t.Cleanup(func() { stdin, stderr = os.Stdin, os.Stderr })
+			args := append([]string{"-config", path, "-hook", "claude-code"}, tt.args...)
+			var out bytes.Buffer
+			err := run(context.Background(), args, &out)
+			var code exitCode
+			switch {
+			case tt.wantCode == -1:
+				if err == nil || !strings.Contains(err.Error(), "the only hook is claude-code") {
+					t.Errorf("err = %v", err)
+				}
+			case tt.wantCode == 0 && err != nil:
+				t.Fatalf("err = %v", err)
+			case tt.wantCode != 0 && (!errors.As(err, &code) || int(code) != tt.wantCode):
+				t.Fatalf("err = %v, want exit %d", err, tt.wantCode)
+			}
+			if tt.wantOut == "" && out.Len() > 0 || !strings.Contains(out.String(), tt.wantOut) {
+				t.Errorf("stdout = %q, want %q", out.String(), tt.wantOut)
+			}
+		})
+	}
+}
+
+func TestHookCheck(t *testing.T) {
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-config", writeHookConfig(t), "-hook", "claude-code", "-check"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"config OK for the Claude Code hook",
+		"agent:             local (owner local)",
+		"2. anything-in-bash: Bash -> allow",
+		"warnings (2):",
+		`rule "no-force-push": deny matches command with a pattern`,
+		`rule "anything-in-bash" allows shell commands without requiring compound: false`,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestHookMode(t *testing.T) {
+	for args, want := range map[string]bool{
+		"-hook claude-code": true, "--hook claude-code": true, "-hook=claude-code": true, "--hook=x": true,
+		"-hok claude-code -hook claude-code": true, "-check": false, "-hooks": false, "hook": false,
+	} {
+		if got := hookMode(strings.Fields(args)); got != want {
+			t.Errorf("hookMode(%q) = %v, want %v", args, got, want)
+		}
+	}
+}
+
+func TestHookVerifyAudit(t *testing.T) {
+	path := writeHookConfig(t)
+	stdin, stderr = strings.NewReader(`{"hook_event_name":"PreToolUse","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"ls"}}`), &bytes.Buffer{}
+	t.Cleanup(func() { stdin, stderr = os.Stdin, os.Stderr })
+	if err := run(context.Background(), []string{"-config", path, "-hook", "claude-code"}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-config", path, "-hook", "claude-code", "-verify-audit"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "audit chain intact: 1 entries checked") {
+		t.Errorf("got %s", out.String())
+	}
+	err := run(context.Background(), []string{"-config", path, "-hook", "claude-code", "-verify-audit", "-audit-head", "h.json"}, &out)
+	if err == nil || !strings.Contains(err.Error(), "no signing keys") {
+		t.Errorf("-audit-head with the hook: err = %v", err)
 	}
 }
