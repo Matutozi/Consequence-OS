@@ -514,3 +514,28 @@ func TestDecisionEntriesCarryTheScore(t *testing.T) {
 		t.Errorf("entry = %+v, want approved with score 82", entries[0])
 	}
 }
+
+func TestDecideLocally(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	id := e.check(t, request("5000")).Approval.ID
+	if _, err := e.svc.DecideLocally(ctx, id, "", true); !errors.Is(err, approval.ErrBadToken) {
+		t.Errorf("nobody named: err = %v, want ErrBadToken", err)
+	}
+	a, err := e.svc.DecideLocally(ctx, id, "local:ada", true)
+	if err != nil || a.Status != approval.StatusApproved || a.DecidedBy != "local:ada" {
+		t.Fatalf("approval = %+v, %v", a, err)
+	}
+	if _, err := e.svc.DecideLocally(ctx, id, "local:ada", false); !errors.Is(err, approval.ErrNotPending) {
+		t.Errorf("decided twice: err = %v, want ErrNotPending", err)
+	}
+	// The decision is audited, as one made with a link would be.
+	entries, _ := e.store.ListAudit(ctx, audit.Filter{Limit: 1})
+	if len(entries) != 1 || entries[0].Outcome != audit.OutcomeApproved || entries[0].Detail != "decided by local:ada" {
+		t.Errorf("audit = %+v", entries)
+	}
+	// The retry goes through once.
+	if got := e.check(t, request("5000")); got.State != approval.StateApproved {
+		t.Errorf("retry: state %v, want approved", got.State)
+	}
+}

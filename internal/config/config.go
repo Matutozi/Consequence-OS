@@ -100,6 +100,16 @@ type Config struct {
 	// LocalAgent names the agent in the local modes, such as the Claude
 	// Code hook, where no API key tells agents apart.
 	LocalAgent LocalAgent `yaml:"local_agent"`
+
+	// StdioEnv names env vars passed on to the MCP server that
+	// consequenced -stdio starts. It gets these and a few basics (PATH,
+	// HOME and the like), nothing else from the agent's environment.
+	StdioEnv []string `yaml:"stdio_env"`
+	// StdioEnvFile is a file of KEY=value lines for that server, such as
+	// its token. Only ConsequenceOS reads it, so the agent never sees the
+	// token. It must be absolute or start with ~/, and readable by its
+	// owner alone.
+	StdioEnvFile string `yaml:"stdio_env_file"`
 }
 
 // LocalAgent is the agent and owner the local modes record calls under.
@@ -235,6 +245,11 @@ func ParseLocal(data []byte, lookupEnv LookupEnv) (*Config, error) {
 	if err := cfg.resolveStateDir(lookupEnv); err != nil {
 		return nil, err
 	}
+	if cfg.StdioEnvFile != "" {
+		if cfg.StdioEnvFile, err = absPath("stdio_env_file", cfg.StdioEnvFile, lookupEnv); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.StateDir == "" {
 		return nil, errors.New("state_dir is required here, e.g. state_dir: ~/.consequence, so the audit log and limits last from one call to the next")
 	}
@@ -267,19 +282,87 @@ func (c *Config) resolveStateDir(lookupEnv LookupEnv) error {
 	if c.DatabaseURLEnv != "" {
 		return errors.New("set database_url_env or state_dir, not both")
 	}
-	dir := c.StateDir
-	if strings.HasPrefix(dir, "~/") { // a bare ~ never arrives: YAML reads it as null
+	dir, err := absPath("state_dir", c.StateDir, lookupEnv)
+	if err != nil {
+		return err
+	}
+	c.StateDir = dir
+	return nil
+}
+
+// absPath expands a leading ~/ in a path setting and checks the result is
+// absolute. A bare ~ never arrives: YAML reads it as null.
+func absPath(setting, p string, lookupEnv LookupEnv) (string, error) {
+	dir := p
+	if strings.HasPrefix(dir, "~/") {
 		home, ok := lookupEnv("HOME")
 		if !ok || home == "" {
-			return errors.New("state_dir starts with ~ but $HOME is not set")
+			return "", fmt.Errorf("%s starts with ~ but $HOME is not set", setting)
 		}
 		dir = filepath.Join(home, strings.TrimPrefix(dir, "~"))
 	}
 	if !filepath.IsAbs(dir) {
-		return fmt.Errorf("state_dir %q must be an absolute path or start with ~/", c.StateDir)
+		return "", fmt.Errorf("%s %q must be an absolute path or start with ~/", setting, p)
 	}
-	c.StateDir = filepath.Clean(dir)
-	return nil
+	return filepath.Clean(dir), nil
+}
+
+// stdioBaseEnv are the env vars every server started by -stdio gets, when
+// they're set: what programs need to run at all.
+var stdioBaseEnv = []string{"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ"}
+
+// StdioEnvironment returns the environment for the server -stdio starts:
+// the basics and stdio_env's names from lookupEnv, then stdio_env_file's
+// lines, which win over both.
+func (c *Config) StdioEnvironment(lookupEnv LookupEnv) ([]string, error) {
+	vars := map[string]string{}
+	var order []string
+	set := func(k, v string) {
+		if _, ok := vars[k]; !ok {
+			order = append(order, k)
+		}
+		vars[k] = v
+	}
+	for _, name := range append(append([]string(nil), stdioBaseEnv...), c.StdioEnv...) {
+		if v, ok := lookupEnv(name); ok {
+			set(name, v)
+		}
+	}
+	if c.StdioEnvFile != "" {
+		info, err := os.Stat(c.StdioEnvFile)
+		if err != nil {
+			return nil, fmt.Errorf("stdio_env_file: %w", err)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return nil, fmt.Errorf("stdio_env_file %s can be read by other users (mode %o); run chmod 600 on it", c.StdioEnvFile, info.Mode().Perm())
+		}
+		data, err := os.ReadFile(c.StdioEnvFile)
+		if err != nil {
+			return nil, fmt.Errorf("stdio_env_file: %w", err)
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			k, v, ok := strings.Cut(line, "=")
+			k = strings.TrimSpace(strings.TrimPrefix(k, "export "))
+			if !ok || k == "" || strings.ContainsAny(k, " \t") {
+				// The line may hold a secret, so it isn't repeated here.
+				return nil, fmt.Errorf("stdio_env_file %s line %d must look like NAME=value", c.StdioEnvFile, i+1)
+			}
+			v = strings.TrimSpace(v)
+			if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+				v = v[1 : len(v)-1]
+			}
+			set(k, v)
+		}
+	}
+	env := make([]string, 0, len(order))
+	for _, k := range order {
+		env = append(env, k+"="+vars[k])
+	}
+	return env, nil
 }
 
 func (c *Config) applyDefaults() {

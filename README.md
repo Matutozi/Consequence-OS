@@ -434,6 +434,9 @@ One YAML file names everything, and secrets live in environment variables that t
 | `upstream_receiver` | The ID of the receiver behind `upstream`. Receipts name it (v1), so no other receiver accepts them. When `receivers` are listed it must be one of them. Unset, receipts are v0 |
 | `upstream_auth_env` | Env var holding a token for the upstream, sent as `Authorization: Bearer …` in place of the agent's key. The upstream must be `https`, or `http` to localhost. See [Hosted MCP servers](#hosted-mcp-servers) |
 | `owners` | `id` and `approvers` (email addresses) for each owner |
+| `local_agent` | For the local modes (the Claude Code hook, `-stdio`): the `id` and `owner_id` calls are recorded under. Default `local` and `local` |
+| `stdio_env` | For `-stdio`: names of env vars the wrapped server gets, besides `PATH`, `HOME` and a few other basics. It gets nothing else |
+| `stdio_env_file` | For `-stdio`: a file of `NAME=value` lines for the wrapped server, such as its token, readable by its owner alone. Absolute or `~/` |
 | `receipts` | `ttl` (default `5m`), `ed25519_key_env`, `mldsa87_key_env` |
 | `database_url_env` | Env var holding a Postgres URL |
 | `state_dir` | A directory for the file store, e.g. `~/.consequence`: absolute, or starting with `~/`. Set this or `database_url_env`, not both. With neither, everything is kept in memory |
@@ -481,6 +484,28 @@ upstream_auth_env: GITHUB_TOKEN      # the env var holding it; the agent never s
   - A token holding a space or control character is refused, so it can't add headers.
   - The upstream must be `https`, or `http` to localhost, so the token never crosses a network unencrypted.
 - **What it can't stop.** The server could encode the token before echoing it, base64 say, and get past the scrubbing. And the agent must not be able to read the token some other way: from your shell's environment, a file, or a command it runs. For coding agents, see [Guarding Claude Code](docs/claude-code.md).
+
+### Local MCP servers
+
+Many MCP servers run as a local process that the agent starts and talks to over stdin and stdout. Put `consequenced -stdio` in front of one, in the agent's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "consequenced",
+      "args": ["-stdio", "-config", "/home/you/.consequence/github.yaml", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
+    }
+  }
+}
+```
+
+It starts the real server and relays messages both ways. Tool calls, resource reads and prompts go past the policy first, parsed exactly as the HTTP proxy parses them. The config needs only `state_dir`, the rules, and optionally `local_agent`. With no `-config`, it uses `~/.consequence/claude-code.yaml`, the same policy and audit log as the Claude Code hook.
+
+- **Asked calls** are refused with an approval ID and a command for the person: `consequenced -approve apr_…`. The command shows the call and asks on the terminal itself, not stdin. An agent running shell commands has no terminal, so it can't approve its own calls. After approval, the agent's retry of that exact call goes through once. `-reject` says no.
+- **The token stays out of the agent's hands.** The server gets `PATH`, `HOME` and a few other basics, the env vars named in `stdio_env`, and the lines of `stdio_env_file`. It gets nothing else from the agent's environment. Put a token in that file (mode `600`, which is enforced), not in the agent's MCP config. The Claude Code hook's starter policy keeps the agent out of `~/.consequence`, so keep the file there.
+- **Failing closed.** If the server exits, every call still waiting for it gets an error, and the wrapper exits. If the policy's state can't be opened, the call isn't forwarded. The wrapper opens the state between calls, not for its whole life, so `-approve`, the hook, and wrappers for other servers can share one `state_dir`.
+- **Not checked yet.** Requests the server sends to the client, such as sampling or elicitation, pass through unchecked, as over HTTP. Receipts aren't added: the server is a process you chose to run, not a receiver, and any receipt the agent puts in a call is removed.
 
 ## Running without Docker
 

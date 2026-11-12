@@ -33,6 +33,13 @@ type Notifier interface {
 	Notify(ctx context.Context, n Notice)
 }
 
+// NoNotifier tells nobody. The local modes use it: an approval there is
+// decided with consequenced -approve at the machine, not with a link.
+type NoNotifier struct{}
+
+// Notify implements Notifier.
+func (NoNotifier) Notify(context.Context, Notice) {}
+
 // LogNotifier writes approver links to the server log. It is the fallback
 // when no email is configured; the log then holds secrets, so treat it as such.
 type LogNotifier struct{ Log *slog.Logger }

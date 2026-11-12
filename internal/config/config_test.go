@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -470,5 +471,46 @@ func TestNoReceiptWarningForAHostedUpstream(t *testing.T) {
 	}
 	if len(cfg.Warnings()) != 1 {
 		t.Errorf("want the upstream_receiver warning back with receivers listed: %q", cfg.Warnings())
+	}
+}
+
+func TestStdioEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "github.env")
+	if err := os.WriteFile(envFile, []byte("# the server's token\nexport GITHUB_TOKEN=\"ghp_secret\"\nPATH=/opt/bin\n\nDEBUG='1'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vars := map[string]string{"HOME": "/home/ada", "PATH": "/usr/bin", "AWS_SECRET_ACCESS_KEY": "leak", "ORG": "acme"}
+	lookup := fakeEnv(vars)
+	cfg, err := ParseLocal([]byte("state_dir: /x\nstdio_env: [ORG, MISSING]\nstdio_env_file: "+envFile+"\n"), lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := cfg.StdioEnvironment(lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(env, " ")
+	if got != "PATH=/opt/bin HOME=/home/ada ORG=acme GITHUB_TOKEN=ghp_secret DEBUG=1" {
+		t.Errorf("env = %q", got)
+	}
+
+	if err := os.Chmod(envFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.StdioEnvironment(lookup); err == nil || !strings.Contains(err.Error(), "can be read by other users") {
+		t.Errorf("a world-readable file: err = %v", err)
+	}
+	if err := os.Chmod(envFile, 0o600); err != nil { // WriteFile keeps an existing file's mode
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envFile, []byte("not a pair holding ghp_secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.StdioEnvironment(lookup); err == nil || !strings.Contains(err.Error(), "line 1") || strings.Contains(err.Error(), "ghp_secret") {
+		t.Errorf("a bad line: err = %v", err)
+	}
+	if _, err := ParseLocal([]byte("state_dir: /x\nstdio_env_file: relative.env\n"), lookup); err == nil {
+		t.Error("a relative stdio_env_file was accepted")
 	}
 }

@@ -90,5 +90,5 @@ The full reference is in [Guarding Claude Code](claude-code.md): what each argum
 ## Other agents and MCP servers
 
 - **An MCP server with a token** (GitHub, Linear and so on): run `consequenced` in front of it with `upstream_auth_env`, so ConsequenceOS holds the token and the agent never sees it. See [Hosted MCP servers](../README.md#hosted-mcp-servers).
-- **A local MCP server** started by your agent: also coming, as `consequenced -stdio`.
+- **A local MCP server** started by your agent: put `consequenced -stdio --` before its command in the agent's MCP config. It uses the same policy and log as the hook, and asks you with `consequenced -approve`. See [Local MCP servers](../README.md#local-mcp-servers).
 - **Cursor and other coding agents** have their own hook formats. Each will get its own `-hook <name>`, on the same policy engine.
