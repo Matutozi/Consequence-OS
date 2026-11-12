@@ -745,3 +745,128 @@ func TestKeyRotation(t *testing.T) {
 		t.Errorf("the current keys as previous: %v", err)
 	}
 }
+
+func TestArchiveAuditCommand(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "state")
+	path := writeTestConfig(t, "state_dir: "+dir+"\n")
+	cli := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		err := run(ctx, append([]string{"-config", path}, args...), &out)
+		return out.String(), err
+	}
+	// Ten entries, a day apart, from 2025-12-27.
+	st, err := store.OpenFile(dir, store.FileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	day := time.Date(2025, 12, 27, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 10; i++ {
+		if _, err := st.AppendAudit(ctx, audit.Entry{Time: day.AddDate(0, 0, i), AgentID: "a", OwnerID: "o", Tool: "x", Outcome: audit.OutcomeForwarded}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st.Close()
+	work := t.TempDir()
+	archive2025 := filepath.Join(work, "audit-2025.jsonl")
+
+	if _, err := cli("-archive-audit", archive2025); err == nil || !strings.Contains(err.Error(), "needs -before") {
+		t.Errorf("without -before: %v", err)
+	}
+	if _, err := cli("-archive-audit", archive2025, "-before", "next week"); err == nil || !strings.Contains(err.Error(), "must be a date") {
+		t.Errorf("a bad -before: %v", err)
+	}
+	out, err := cli("-archive-audit", archive2025, "-before", "2026-01-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Archived 5 entries (1 to 5") {
+		t.Errorf("-archive-audit:\n%s", out)
+	}
+	info, err := os.Stat(archive2025)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("archive file: %v, %v", info, err)
+	}
+	if out, err := cli("-verify-audit"); err != nil || !strings.Contains(out, "audit chain intact: 6 entries checked, after entry 5, where the archived entries end (anchor signature checked)") {
+		t.Errorf("-verify-audit after archiving: %v\n%s", err, out)
+	}
+	if out, err := cli("-verify-audit", "-archive", archive2025); err != nil || !strings.Contains(out, "archive intact: 5 entries, from the start of the log through entry 5 (head signature checked)") {
+		t.Errorf("-verify-audit -archive: %v\n%s", err, out)
+	}
+	if out, _ := cli("-hook", "claude-code", "-log", "-n", "50"); strings.Count(out, "forwarded") != 5 || !strings.Contains(out, "archived") {
+		t.Errorf("the log after archiving:\n%s", out)
+	}
+	if _, err := cli("-archive-audit", archive2025, "-before", "2026-01-03"); err == nil || !strings.Contains(err.Error(), "never overwritten") {
+		t.Errorf("onto an existing file: %v", err)
+	}
+
+	// A second archive starts where the first ended.
+	archive2 := filepath.Join(work, "audit-2026-01.jsonl")
+	if out, err := cli("-archive-audit", archive2, "-before", "2026-01-03"); err != nil || !strings.Contains(out, "Archived 2 entries (6 to 7") {
+		t.Fatalf("the second archive: %v\n%s", err, out)
+	}
+	if out, err := cli("-verify-audit", "-archive", archive2); err != nil || !strings.Contains(out, "after entry 5 (head signature checked) through entry 7") {
+		t.Errorf("the second archive: %v\n%s", err, out)
+	}
+	if out, _ := cli("-archive-audit", filepath.Join(work, "none.jsonl"), "-before", "2020-01-01"); !strings.Contains(out, "Nothing to archive") {
+		t.Errorf("nothing before the date: %s", out)
+	}
+
+	// An edited archive is caught.
+	data, _ := os.ReadFile(archive2025)
+	edited := filepath.Join(work, "edited.jsonl")
+	_ = os.WriteFile(edited, bytes.Replace(data, []byte(`"tool":"x"`), []byte(`"tool":"y"`), 1), 0o600)
+	if out, err := cli("-verify-audit", "-archive", edited); err == nil || !strings.Contains(out, "archive BROKEN") {
+		t.Errorf("an edited archive: %v\n%s", err, out)
+	}
+
+	// A broken log isn't archived: that would delete the evidence.
+	st, err = store.OpenFile(dir, store.FileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	journal := filepath.Join(dir, "journal.jsonl")
+	jdata, _ := os.ReadFile(journal)
+	lines := strings.Split(string(jdata), "\n")
+	for i, l := range lines {
+		if strings.Contains(l, `"op":"audit"`) && strings.Contains(l, `"tool":"x"`) {
+			lines[i] = strings.Replace(l, `"tool":"x"`, `"tool":"z"`, 1)
+			break
+		}
+	}
+	_ = os.WriteFile(journal, []byte(strings.Join(lines, "\n")), 0o600)
+	if _, err := cli("-archive-audit", filepath.Join(work, "after-tamper.jsonl"), "-before", "2026-01-06"); err == nil || !strings.Contains(err.Error(), "chain is broken") {
+		t.Errorf("archiving a broken log: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(work, "after-tamper.jsonl")); err == nil {
+		t.Error("an archive was written from a broken log")
+	}
+}
+
+// The local modes archive too, unsigned: they have no signing keys.
+func TestArchiveAuditLocal(t *testing.T) {
+	path := writeHookConfig(t)
+	in := `{"session_id":"s","cwd":"/tmp","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`
+	for i := 0; i < 3; i++ {
+		stdin = strings.NewReader(in)
+		_ = run(context.Background(), []string{"-config", path, "-hook", "claude-code"}, &bytes.Buffer{})
+	}
+	t.Cleanup(func() { stdin = os.Stdin })
+	file := filepath.Join(t.TempDir(), "a.jsonl")
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-config", path, "-archive-audit", file, "-before", time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Archived 3 entries") || !strings.Contains(out.String(), "aren't signed") {
+		t.Errorf("local archive:\n%s", out.String())
+	}
+	out.Reset()
+	if err := run(context.Background(), []string{"-config", path, "-verify-audit", "-archive", file}, &out); err != nil || !strings.Contains(out.String(), "(head unsigned)") {
+		t.Errorf("local -verify-audit -archive: %v\n%s", err, out.String())
+	}
+	out.Reset()
+	if err := run(context.Background(), []string{"-config", path, "-hook", "claude-code", "-verify-audit"}, &out); err != nil || !strings.Contains(out.String(), "(anchor unsigned)") {
+		t.Errorf("local -verify-audit after archiving: %v\n%s", err, out.String())
+	}
+}

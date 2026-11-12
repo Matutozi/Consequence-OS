@@ -35,6 +35,7 @@ const (
 	opUsage         = "usage"
 	opPruneUsage    = "prune_usage"
 	opToolPin       = "tool_pin" // a tool's pin, whole
+	opArchive       = "archive"  // entries through anchor.seq deleted, and the anchor set
 )
 
 // record is one line of the journal.
@@ -44,6 +45,7 @@ type record struct {
 	Approval *approvalRecord `json:"approval,omitempty"`
 	Usage    *usageRecord    `json:"usage,omitempty"`
 	Pin      *toolpin.Pin    `json:"pin,omitempty"`
+	Anchor   *audit.Anchor   `json:"anchor,omitempty"`
 	ID       string          `json:"id,omitempty"`
 	Status   approval.Status `json:"status,omitempty"`
 	By       string          `json:"by,omitempty"`
@@ -204,6 +206,13 @@ func (m *Memory) apply(rec *record) error {
 		err = m.RecordUsage(ctx, rec.Usage.usage())
 	case opPruneUsage:
 		_, err = m.PruneUsage(ctx, rec.At)
+	case opArchive:
+		if rec.Anchor == nil {
+			return errors.New("archive line without an anchor")
+		}
+		m.mu.Lock()
+		m.archiveLocked(*rec.Anchor)
+		m.mu.Unlock()
 	case opToolPin:
 		if rec.Pin == nil || rec.Pin.Server == "" || rec.Pin.Tool == "" {
 			return errors.New("tool_pin line without a pin")
@@ -224,6 +233,13 @@ func (m *Memory) apply(rec *record) error {
 // so nothing changes meanwhile. The new journal is written beside the old
 // one and renamed over it, so a crash leaves one or the other, whole.
 func (f *File) compact() {
+	if err := f.compactNow(); err != nil {
+		f.log.Warn("journal compaction failed; carrying on with the full journal", "journal", filepath.Join(f.dir, journalName), "err", err)
+	}
+}
+
+// compactNow is compact, returning why it failed. Callers hold f.mu.
+func (f *File) compactNow() error {
 	path := filepath.Join(f.dir, journalName)
 	tmp := path + ".tmp"
 	before := f.size
@@ -234,8 +250,7 @@ func (f *File) compact() {
 	if err != nil {
 		_ = os.Remove(tmp)
 		f.base = f.size // try again once it has doubled again, not on every write
-		f.log.Warn("journal compaction failed; carrying on with the full journal", "journal", path, "err", err)
-		return
+		return err
 	}
 	_ = syncDir(f.dir)
 	j, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0o600)
@@ -244,11 +259,12 @@ func (f *File) compact() {
 		// would lose every change.
 		e := fmt.Errorf("store: reopen the compacted journal, so the file store refuses every request until a restart: %w", err)
 		f.broken.Store(&e)
-		return
+		return e
 	}
 	_ = f.journal.Close()
 	f.journal, f.size, f.base = j, size, size
 	f.log.Info("journal compacted", "journal", path, "bytes_before", before, "bytes_after", size)
+	return nil
 }
 
 // writeSnapshot writes the current state to path as journal lines and
@@ -256,6 +272,11 @@ func (f *File) compact() {
 func (f *File) writeSnapshot(path string) (int64, error) {
 	m := f.mem
 	m.mu.Lock()
+	var anchor *audit.Anchor
+	if m.anchor != nil {
+		a := *m.anchor
+		anchor = &a
+	}
 	entries := append([]audit.Entry(nil), m.audit...)
 	approvals := append([]approval.Approval(nil), m.approvals...)
 	usage := append([]policy.UsageRecord(nil), m.usage...)
@@ -288,6 +309,11 @@ func (f *File) writeSnapshot(path string) (int64, error) {
 		n, err := bw.Write(line)
 		size += int64(n)
 		return err
+	}
+	if anchor != nil { // first, so replay starts the chain from it
+		if err := emit(&record{Op: opArchive, Anchor: anchor}); err != nil {
+			return 0, err
+		}
 	}
 	for i := range entries {
 		if err := emit(&record{Op: opAudit, Audit: &entries[i]}); err != nil {

@@ -90,7 +90,20 @@ type ChainReport struct {
 	Problem  string `json:"problem,omitempty"`
 	HeadSeq  int64  `json:"head_seq,omitempty"` // the last entry checked
 	HeadHash string `json:"head_hash,omitempty"`
+	// ArchivedThrough is the last entry archived and deleted, when older
+	// entries were: the chain is checked from there (see Anchor).
+	ArchivedThrough int64 `json:"archived_through,omitempty"`
+	// Anchor says how far the anchor was checked: AnchorChecked,
+	// AnchorUnsigned or AnchorNotChecked. Empty when nothing was archived.
+	Anchor string `json:"anchor,omitempty"`
 }
+
+// How far an anchor was checked.
+const (
+	AnchorChecked    = "signature checked"
+	AnchorUnsigned   = "unsigned"              // archived in a local mode, which has no signing keys
+	AnchorNotChecked = "signature not checked" // no keys to check it with were given
+)
 
 // ChainVerifier checks entries one at a time, oldest first, so a long log
 // never has to fit in memory.
@@ -103,6 +116,38 @@ type ChainVerifier struct {
 	headSeq  int64
 	headHash string
 	headSeen bool
+
+	// CheckHead checks the signed head of an anchor. nil leaves it
+	// unchecked, and the report says so.
+	CheckHead HeadChecker
+}
+
+// HeadChecker checks a signed audit head and returns the entry it names.
+type HeadChecker func(signed []byte) (seq int64, hash string, err error)
+
+// StartAfter makes the check start after an anchor: the first entry must
+// link to the anchor's hash, as if the archived entries were still there.
+// It checks the anchor's head with CheckHead, if both are there, and
+// returns why the anchor can't be trusted, if it can't.
+func (v *ChainVerifier) StartAfter(a Anchor) error {
+	v.started, v.prev = true, a.Hash
+	v.report.ArchivedThrough = a.Seq
+	status, err := a.check(v.CheckHead)
+	v.report.Anchor = status
+	if err != nil {
+		v.report.Problem = "the anchor where the log starts after archiving doesn't check out: " + err.Error()
+		return err
+	}
+	// A saved head from before the anchor is in an archive: check it
+	// there, with consequenced -verify-audit -archive.
+	if v.headSeq != 0 && v.headSeq <= a.Seq {
+		if v.headSeq == a.Seq && v.headHash != a.Hash {
+			v.report.Problem = "the saved head doesn't match the anchor where the log starts after archiving (the log was rewritten)"
+			return errors.New(v.report.Problem)
+		}
+		v.headSeen = true
+	}
+	return nil
 }
 
 // ExpectHead makes the check also require that entry seq still exists with
@@ -158,6 +203,12 @@ func (v *ChainVerifier) Report() ChainReport {
 	return r
 }
 
+// AnchorSource gives the anchor the log starts from after archiving. The
+// store implements it.
+type AnchorSource interface {
+	AuditAnchor(ctx context.Context) (a Anchor, ok bool, err error)
+}
+
 // Walker reads the whole log, oldest first. The store implements it.
 type Walker interface {
 	ForEachAudit(ctx context.Context, fn func(Entry) error) error
@@ -172,8 +223,20 @@ func VerifyChain(ctx context.Context, w Walker) (ChainReport, error) {
 }
 
 // VerifyChainWith checks every entry with a verifier set up by the caller,
-// for example with ExpectHead.
+// for example with ExpectHead. When w is also an AnchorSource and older
+// entries were archived, the check starts after the anchor.
 func VerifyChainWith(ctx context.Context, w Walker, v *ChainVerifier) (ChainReport, error) {
+	if src, ok := w.(AnchorSource); ok {
+		a, archived, err := src.AuditAnchor(ctx)
+		if err != nil {
+			return ChainReport{}, err
+		}
+		if archived {
+			if err := v.StartAfter(a); err != nil {
+				return v.Report(), nil
+			}
+		}
+	}
 	err := w.ForEachAudit(ctx, func(e Entry) error {
 		if !v.Add(e) {
 			return errStop

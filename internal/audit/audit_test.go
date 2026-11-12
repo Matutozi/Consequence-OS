@@ -157,9 +157,9 @@ func TestVerifyAndHeadHandlers(t *testing.T) {
 		wantStatus int
 		wantBody   string
 	}{
-		{"verify needs the token", VerifyHandler(walker(entries), "admin", log), "", 401, "admin token required"},
-		{"verify intact", VerifyHandler(walker(entries), "admin", log), "admin", 200, `"intact":true`},
-		{"verify broken", VerifyHandler(walker(missing), "admin", log), "admin", 200, `"broken_at":"aud_c"`},
+		{"verify needs the token", VerifyHandler(walker(entries), nil, "admin", log), "", 401, "admin token required"},
+		{"verify intact", VerifyHandler(walker(entries), nil, "admin", log), "admin", 200, `"intact":true`},
+		{"verify broken", VerifyHandler(walker(missing), nil, "admin", log), "admin", 200, `"broken_at":"aud_c"`},
 		{"head needs the token", HeadHandler(fakeHead{entries[2], true}, sign, "admin", log), "wrong", 401, "admin token required"},
 		{"head is signed", HeadHandler(fakeHead{entries[2], true}, sign, "admin", log), "admin", 200, `{"signed":3,"hash":"` + entries[2].Hash + `"}`},
 		{"empty log has no head", HeadHandler(fakeHead{}, sign, "admin", log), "admin", 404, "no chained entries"},

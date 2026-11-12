@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"sync"
 	"time"
 
@@ -27,6 +28,14 @@ type Store interface {
 	audit.Walker
 	// LastAudit returns the newest entry, or ok=false when the log is empty.
 	LastAudit(ctx context.Context) (e audit.Entry, ok bool, err error)
+	// AuditAnchor returns where the log starts after older entries were
+	// archived, or ok=false when none were.
+	audit.AnchorSource
+	// ArchiveAudit deletes every entry up to and including entry a.Seq,
+	// which must have hash a.Hash, and makes a the anchor, in one step:
+	// the chain then starts from a. It returns how many entries it
+	// deleted. Entries written later link to a.Hash when none are left.
+	ArchiveAudit(ctx context.Context, a audit.Anchor) (int64, error)
 
 	// An interface can embed another: Store includes every approval method.
 	approval.Repository
@@ -61,6 +70,7 @@ type Memory struct {
 	receipts  map[string]time.Time // used receipt ID -> its expiry
 	usage     []policy.UsageRecord
 	pins      map[pinKey]toolpin.Pin
+	anchor    *audit.Anchor // where the log starts after archiving
 }
 
 // NewMemory returns an empty in-memory store.
@@ -107,17 +117,80 @@ func (m *Memory) AppendAudit(_ context.Context, e audit.Entry) (audit.Entry, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock() // defer runs when the function returns, so the lock is always released
-	prev := ""
-	if n := len(m.audit); n > 0 {
-		prev = m.audit[n-1].Hash
-	}
+	prev, seq := m.lastLocked()
 	e, err := audit.Chain(prev, e)
 	if err != nil {
 		return audit.Entry{}, err
 	}
-	e.Seq = int64(len(m.audit) + 1)
+	e.Seq = seq + 1
 	m.audit = append(m.audit, e)
 	return e, nil
+}
+
+// lastLocked returns the hash and seq the next entry follows: the newest
+// entry's, or the anchor's once every entry was archived. Callers hold m.mu.
+func (m *Memory) lastLocked() (hash string, seq int64) {
+	if n := len(m.audit); n > 0 {
+		return m.audit[n-1].Hash, m.audit[n-1].Seq
+	}
+	if m.anchor != nil {
+		return m.anchor.Hash, m.anchor.Seq
+	}
+	return "", 0
+}
+
+// AuditAnchor implements audit.AnchorSource.
+func (m *Memory) AuditAnchor(context.Context) (audit.Anchor, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.anchor == nil {
+		return audit.Anchor{}, false, nil
+	}
+	return *m.anchor, true, nil
+}
+
+// ArchiveAudit implements Store.
+func (m *Memory) ArchiveAudit(_ context.Context, a audit.Anchor) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.checkArchiveLocked(a); err != nil {
+		return 0, err
+	}
+	return m.archiveLocked(a), nil
+}
+
+// checkArchiveLocked checks a may become the anchor: it names an entry
+// in the log, by its hash, after the anchor there is now.
+func (m *Memory) checkArchiveLocked(a audit.Anchor) error {
+	if m.anchor != nil && a.Seq <= m.anchor.Seq {
+		return fmt.Errorf("store: entry %d is already archived", a.Seq)
+	}
+	for _, e := range m.audit {
+		if e.Seq == a.Seq {
+			if e.Hash == "" || e.Hash != a.Hash {
+				return fmt.Errorf("store: entry %d's hash isn't %s", a.Seq, a.Hash)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("store: there is no entry %d to archive up to", a.Seq)
+}
+
+// archiveLocked deletes the entries through a.Seq and sets the anchor,
+// with no checks: replaying the journal uses it as well.
+func (m *Memory) archiveLocked(a audit.Anchor) int64 {
+	kept := m.audit[:0]
+	for _, e := range m.audit {
+		if e.Seq > a.Seq {
+			kept = append(kept, e)
+		}
+	}
+	n := int64(len(m.audit) - len(kept))
+	// Clear the tail, so the deleted entries don't linger in the backing array.
+	clear(m.audit[len(kept):])
+	m.audit = kept
+	m.anchor = &a
+	return n
 }
 
 // ForEachAudit implements audit.Walker. It works on a copy, so fn may take

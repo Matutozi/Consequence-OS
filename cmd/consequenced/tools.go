@@ -27,10 +27,11 @@ import (
 // and a local one: the stdio wrapper pins the tools of the servers it
 // starts in its state_dir.
 
-// loadToolsConfig loads the config for -tools and -accept-tool. Without
-// -config, it is ./consequence.yaml when there is one, and the local
-// modes' config otherwise.
-func loadToolsConfig(path string, configSet bool) (*config.Config, bool, error) {
+// loadAnyConfig loads the config for commands that work on the server's
+// config and a local one alike: -tools, -accept-tool, -archive-audit and
+// -verify-audit -archive. Without -config, it is ./consequence.yaml when
+// there is one, and the local modes' config otherwise.
+func loadAnyConfig(path string, configSet bool) (*config.Config, bool, error) {
 	if !configSet {
 		if _, err := os.Stat(path); err != nil {
 			home, err := os.UserHomeDir()
@@ -181,6 +182,23 @@ func similarPaths(schemas []any, arg string) []string {
 	return out
 }
 
+// openForChanging opens the configured store to change it from the
+// command line: the file store, or Postgres. what names the change, for
+// the error when a running server holds the state_dir.
+func openForChanging(ctx context.Context, cfg *config.Config, local bool, what string, log *slog.Logger) (store.Store, error) {
+	if cfg.StateDir == "" && cfg.DatabaseURL == "" {
+		return nil, errors.New("this needs database_url_env or state_dir: the in-memory store keeps nothing between runs")
+	}
+	if cfg.StateDir == "" {
+		return store.OpenPostgres(ctx, cfg.DatabaseURL)
+	}
+	st, err := store.OpenFile(cfg.StateDir, store.FileOptions{Log: log, LockTimeout: hook.DefaultLockTimeout})
+	if errors.Is(err, store.ErrLocked) && !local {
+		return nil, fmt.Errorf("%w; the server holds its state_dir while it runs, so stop it, %s, and start it again", err, what)
+	}
+	return st, err
+}
+
 // runAcceptTool shows a tool's waiting change and, if the person types
 // yes on the terminal, accepts it. Like -approve, it asks on the terminal
 // itself, so an agent running commands can't accept a change to a tool it
@@ -191,17 +209,7 @@ func runAcceptTool(ctx context.Context, cfg *config.Config, local bool, tool, se
 		if !local && cfg.StateDir == "" && cfg.DatabaseURL == "" {
 			return nil, errors.New("this server keeps its pins in memory, where only it can change them; a restart pins every tool afresh")
 		}
-		var st store.Store
-		var err error
-		if cfg.StateDir != "" {
-			st, err = store.OpenFile(cfg.StateDir, store.FileOptions{Log: log, LockTimeout: hook.DefaultLockTimeout})
-		} else {
-			st, err = store.OpenPostgres(ctx, cfg.DatabaseURL)
-		}
-		if errors.Is(err, store.ErrLocked) && !local {
-			return nil, fmt.Errorf("%w; the server holds its state_dir while it runs, so stop it, accept the change, and start it again", err)
-		}
-		return st, err
+		return openForChanging(ctx, cfg, local, "accept the change", log)
 	}
 
 	st, err := open()
