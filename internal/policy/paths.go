@@ -109,9 +109,10 @@ func walk(node any, path []string, loose bool) (vals []any, complete bool) {
 // or an item missing the field, can't ride along with good ones.
 func (c Condition) holds(args map[string]any, loose bool) bool {
 	vals, complete := lookup(args, c.Arg, loose)
+	match := func(v any) bool { return c.matchValue(promptValue(v, c.Op, loose)) }
 	if loose {
 		for _, v := range vals {
-			if c.matchValue(v) {
+			if match(v) {
 				return true
 			}
 		}
@@ -121,7 +122,7 @@ func (c Condition) holds(args map[string]any, loose bool) bool {
 		return false
 	}
 	for _, v := range vals {
-		if !c.matchValue(v) {
+		if !match(v) {
 			return false
 		}
 	}
@@ -137,7 +138,7 @@ func limitAmount(args map[string]any, arg string, loose bool) (amount float64, n
 	vals, _ := lookup(args, arg, loose)
 	sum := strings.Contains(arg, "*") && len(named(args, arg, loose)) == 0
 	for _, v := range vals {
-		f, isNum := toNumber(v)
+		f, isNum := toNumber(promptValue(v, OpGt, loose))
 		if !isNum {
 			continue
 		}

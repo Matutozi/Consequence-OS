@@ -26,6 +26,7 @@ func readRules() []policy.Rule {
 		{Name: "no-system-files", Tool: "resource:file:///etc/*", Action: policy.ActionDeny},
 		{Name: "incident-prompts-need-review", Tool: "prompt:incident-*", Action: policy.ActionAsk},
 		{Name: "no-customer-exports", Tool: "prompt:export", When: policy.Conditions{{Arg: "table", Op: policy.OpEq, Value: "customers", Fold: true}}, Action: policy.ActionDeny},
+		{Name: "no-big-exports", Tool: "prompt:export", When: policy.Conditions{{Arg: "rows", Op: policy.OpGt, Value: 1000}}, Action: policy.ActionDeny},
 	}
 }
 
@@ -96,6 +97,18 @@ func TestReads(t *testing.T) {
 		{
 			name: "conditions work on prompt arguments", body: getPrompt("export", `{"table":"Customers"}`),
 			wantStatus: 200, wantInBody: "does not allow getting the prompt export", wantOutcome: audit.OutcomeBlocked,
+		},
+		{
+			name: "a prompt argument's number, sent as text, is compared as a number", body: getPrompt("export", `{"table":"orders","rows":"5000"}`),
+			wantStatus: 200, wantInBody: `policy rule \"no-big-exports\"`, wantOutcome: audit.OutcomeBlocked,
+		},
+		{
+			name: "and spelled another way, still", body: getPrompt("export", `{"table":"orders","rows":" 5e3"}`),
+			wantStatus: 200, wantInBody: `policy rule \"no-big-exports\"`, wantOutcome: audit.OutcomeBlocked,
+		},
+		{
+			name: "a small one goes through", body: getPrompt("export", `{"table":"orders","rows":"50"}`),
+			wantStatus: 200, wantForwarded: true, wantOutcome: audit.OutcomeForwarded, wantTool: "prompt:export",
 		},
 		{
 			name: "an ask rule holds a prompt", body: getPrompt("incident-report", `{}`),
