@@ -34,6 +34,11 @@ const (
 
 // Config is the whole of consequence.yaml.
 type Config struct {
+	// Mode is "enforce" (the default) or "observe": shadow mode, in which
+	// every call is decided and audited but none is stopped by the policy.
+	// See gate.Options.Observe.
+	Mode string `yaml:"mode"`
+
 	Listen           string        `yaml:"listen"`
 	Upstream         string        `yaml:"upstream"`
 	ApprovalValidity time.Duration `yaml:"approval_validity"` // yaml.v3 parses strings like "10m"
@@ -134,6 +139,22 @@ type ToolPins struct {
 	// (the default), or "allow" for a server whose schemas leave out
 	// arguments it takes.
 	UnnamedArguments string `yaml:"unnamed_arguments"`
+}
+
+// What mode may be.
+const (
+	ModeEnforce = "enforce"
+	ModeObserve = "observe"
+)
+
+// Observe reports whether the config is in observe mode.
+func (c *Config) Observe() bool { return c.Mode == ModeObserve }
+
+func (c *Config) validateMode() error {
+	if c.Mode != ModeEnforce && c.Mode != ModeObserve {
+		return fmt.Errorf("mode %q must be %s or %s", c.Mode, ModeEnforce, ModeObserve)
+	}
+	return nil
 }
 
 // What tool_pins.unnamed_arguments may be.
@@ -354,6 +375,9 @@ func ParseLocal(data []byte, lookupEnv LookupEnv) (*Config, error) {
 	if err := cfg.ToolPins.validate(); err != nil {
 		return nil, err
 	}
+	if err := cfg.validateMode(); err != nil {
+		return nil, err
+	}
 	if cfg.StateDir == "" {
 		return nil, errors.New("state_dir is required here, e.g. state_dir: ~/.consequence, so the audit log and limits last from one call to the next")
 	}
@@ -484,6 +508,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.ToolPins.UnnamedArguments == "" {
 		c.ToolPins.UnnamedArguments = UnnamedRefuse
+	}
+	if c.Mode == "" {
+		c.Mode = ModeEnforce
 	}
 	if c.DefaultAllowBelow == nil {
 		n := policy.DefaultAllowBelow
@@ -642,6 +669,9 @@ func (c *Config) validate() error {
 	if err := c.ToolPins.validate(); err != nil {
 		return err
 	}
+	if err := c.validateMode(); err != nil {
+		return err
+	}
 	if u, err := url.Parse(c.PublicURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("public_url %q must be an http(s) URL", c.PublicURL)
 	}
@@ -798,7 +828,7 @@ func (c *Config) validateKeys() error {
 // Warnings points out settings that are valid but weaker than they should
 // be. consequenced -check prints them and the server logs them at startup.
 func (c *Config) Warnings() []string {
-	var w []string
+	w := c.LocalWarnings()
 	// A hosted upstream, reached with upstream_auth_env's token and with no
 	// receivers listed, checks no receipts: the token is what keeps the
 	// agent from going around ConsequenceOS. Receipt versions don't matter.
@@ -808,6 +838,15 @@ func (c *Config) Warnings() []string {
 			"any receiver with the same tool would accept them. Set it to the upstream's receiver ID.")
 	}
 	return w
+}
+
+// LocalWarnings are the warnings that apply to the local modes too.
+func (c *Config) LocalWarnings() []string {
+	if c.Observe() {
+		return []string{"mode is observe: calls are decided and audited, but the policy stops none of them. " +
+			"Set mode: enforce once the log shows what you expect"}
+	}
+	return nil
 }
 
 // ReceiverKeys maps each receiver's API key to its ID.

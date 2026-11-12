@@ -139,7 +139,7 @@ func run(ctx context.Context, in io.Reader, errOut io.Writer, opts Options) (*ou
 		return nil, block("the state_dir can't be opened: %v", err)
 	}
 	defer st.Close()
-	g, err := gate.New(gate.Options{Engine: engine, Store: st, Log: log, Now: opts.Now}) // no approvals: the person is at the keyboard
+	g, err := gate.New(gate.Options{Engine: engine, Store: st, Observe: cfg.Observe(), Log: log, Now: opts.Now}) // no approvals: the person is at the keyboard
 	if err != nil {
 		return nil, err
 	}

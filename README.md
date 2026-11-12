@@ -151,6 +151,35 @@ If the audit log, the approval store or receipt signing is unavailable, the call
 
 One agent can have at most `max_pending_approvals` requests waiting (20 by default). Past that, a new ask is refused instead of held, so nobody is emailed. Without the cap, an agent could open a new approval for every slightly changed argument and wear the approvers down. The refusal is audited as `blocked` with the detail `too many pending approvals`. On a busy deployment with several servers sharing one database, a burst can overshoot the cap by a few.
 
+### Observe mode
+
+To try a policy without stopping anything, start in observe mode (shadow mode):
+
+```yaml
+mode: observe
+```
+
+Every call is decided and audited as usual, but none is stopped by the policy. A call that would have been denied, held or refused goes ahead, and the audit log records it as `observed`, with the rule and what would have happened: `observe mode: would have been blocked`. No approval is opened, and nobody is emailed. It works the same with the proxy, `-stdio` and the Claude Code hook.
+
+```bash
+consequenced -report -since 7d
+# From 2026-11-05 09:00 to 2026-11-12 09:00 (7 days): 1240 calls
+#     forwarded  1196
+#      observed    44
+#
+# Stopped, or would have been, by rule:
+#   RULE             CALLS  WHAT                               TOOLS
+#   big-refunds      31     would have been held for approval  payments.refund (31)
+#   no-prod-deletes  13     would have been blocked            db.delete_rows (13)
+```
+
+`-report` works in either mode: in enforce mode it shows what was stopped. Once the report shows what you expect, set `mode: enforce`, the default. `-check` and the server's log say which mode is on.
+
+What observe mode keeps:
+- **Receipts don't lie.** A tool call the policy wouldn't have allowed goes without a receipt, since a receipt says the policy allowed the call. A receiver that checks receipts still refuses it, so observe mode is for systems that don't check them yet.
+- **The checks that aren't policy.** Requests that could be read two ways are still refused (duplicate keys, case-variant keys, batches), and so is anything when what the decision depends on is unavailable, such as the store.
+- **Pins and limits.** A changed tool stays in the listing, but the change is recorded. Observed calls count towards limits, since they happened.
+
 ## Consequence
 
 Before the policy decides, each call is assessed: a score from 0 to 100, how reversible it is, and the reasons for both. Today the assessment comes from the `tools` map: read tools score 0, reversible ones 40, and irreversible or unlisted ones 80. Rules can match on it:
@@ -491,6 +520,7 @@ One YAML file names everything, and secrets live in environment variables that t
 
 | Setting | Meaning |
 |---|---|
+| `mode` | `enforce` (the default), or `observe`: decide and audit every call, but stop none. See [Observe mode](#observe-mode) |
 | `listen`, `public_url` | Where to listen (overridden by `$CONSEQUENCE_LISTEN`, and that by `-listen`), and the base URL used in approval links |
 | `upstream` | The MCP server to forward to |
 | `approval_timeout` | How long a held call waits for a decision before it expires (default `1h`) |
@@ -662,7 +692,8 @@ This is an early MVP. Built:
 - pinned tool definitions: a changed tool is hidden from the model and asks until accepted, and arguments its schema doesn't name are refused;
 - signing key rotation, with old keys kept for saved audit heads, and offline receivers that pick up new keys by themselves;
 - archiving old audit entries to a file that can be checked on its own, without breaking the chain;
-- policy checks on what the server asks of the client: elicitation, sampling and roots.
+- policy checks on what the server asks of the client: elicitation, sampling and roots;
+- observe mode, which decides and audits every call but stops none, and a report of what was or would have been stopped.
 
 Not yet:
 - passkey-signed approvals.

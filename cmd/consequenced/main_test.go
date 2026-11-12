@@ -870,3 +870,55 @@ func TestArchiveAuditLocal(t *testing.T) {
 		t.Errorf("local -verify-audit after archiving: %v\n%s", err, out.String())
 	}
 }
+
+// Observe mode with the hook: a call the policy denies goes ahead, and
+// -report shows what would have been stopped.
+func TestObserveModeAndReport(t *testing.T) {
+	path := writeHookConfig(t)
+	data, _ := os.ReadFile(path)
+	if err := os.WriteFile(path, append([]byte("mode: observe\n"), data...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stdin = os.Stdin })
+	hookCall := func(command string) (string, error) {
+		in := fmt.Sprintf(`{"session_id":"s","cwd":"/tmp","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":%q}}`, command)
+		stdin = strings.NewReader(in)
+		var out bytes.Buffer
+		err := run(context.Background(), []string{"-config", path, "-hook", "claude-code"}, &out)
+		return out.String(), err
+	}
+	for _, c := range []string{"git push --force", "git push --force origin main", "ls"} {
+		if out, err := hookCall(c); err != nil || out != "" {
+			t.Errorf("%q in observe mode: %v, %q; want it let through", c, err, out)
+		}
+	}
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-config", path, "-hook", "claude-code", "-check"}, &out); err != nil ||
+		!strings.Contains(out.String(), "mode:              observe") || !strings.Contains(out.String(), "mode is observe") {
+		t.Errorf("-check in observe mode: %v\n%s", err, out.String())
+	}
+
+	// An entry from ten days ago is outside -since 1d.
+	st, err := store.OpenFile(filepath.Join(filepath.Dir(path), "state"), store.FileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppendAudit(context.Background(), audit.Entry{Time: time.Now().AddDate(0, 0, -10), Tool: "Bash", Rule: "no-force-push", Outcome: audit.OutcomeBlocked}); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	out.Reset()
+	if err := run(context.Background(), []string{"-config", path, "-report", "-since", "1d"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"(1 day): 3 calls", "Observe mode", "observed  2", "forwarded  1",
+		"no-force-push  2      would have been blocked  Bash (2)"} {
+		if !strings.Contains(strings.Join(strings.Fields(out.String()), " "), strings.Join(strings.Fields(want), " ")) {
+			t.Errorf("-report: no %q in:\n%s", want, out.String())
+		}
+	}
+	if err := run(context.Background(), []string{"-config", path, "-report", "-since", "soon"}, &bytes.Buffer{}); err == nil {
+		t.Error("-since soon was accepted")
+	}
+}
