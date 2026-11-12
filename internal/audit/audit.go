@@ -29,6 +29,12 @@ const (
 	// OutcomeAskedUser: a local mode, such as the Claude Code hook, asked
 	// the person at the keyboard. ConsequenceOS doesn't learn their answer.
 	OutcomeAskedUser Outcome = "asked_user"
+
+	// Tool definitions (see internal/toolpin). These entries are about a
+	// tool, not a call: Tool names it, and Detail gives the hashes.
+	OutcomeToolPinned   Outcome = "tool_pinned"   // listed for the first time, and pinned
+	OutcomeToolChanged  Outcome = "tool_changed"  // listed with a definition other than its pin
+	OutcomeToolAccepted Outcome = "tool_accepted" // a person accepted the change
 )
 
 // Entry is one line in the audit log. It never holds raw arguments, only

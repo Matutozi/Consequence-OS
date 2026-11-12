@@ -17,6 +17,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/approval"
 	"github.com/matutozi/consequence-os/internal/audit"
 	"github.com/matutozi/consequence-os/internal/policy"
+	"github.com/matutozi/consequence-os/internal/toolpin"
 )
 
 // The journal's operations, one per kind of change. Replaying a line
@@ -33,6 +34,7 @@ const (
 	opPruneReceipts = "prune_receipts"
 	opUsage         = "usage"
 	opPruneUsage    = "prune_usage"
+	opToolPin       = "tool_pin" // a tool's pin, whole
 )
 
 // record is one line of the journal.
@@ -41,6 +43,7 @@ type record struct {
 	Audit    *audit.Entry    `json:"audit,omitempty"`
 	Approval *approvalRecord `json:"approval,omitempty"`
 	Usage    *usageRecord    `json:"usage,omitempty"`
+	Pin      *toolpin.Pin    `json:"pin,omitempty"`
 	ID       string          `json:"id,omitempty"`
 	Status   approval.Status `json:"status,omitempty"`
 	By       string          `json:"by,omitempty"`
@@ -201,6 +204,13 @@ func (m *Memory) apply(rec *record) error {
 		err = m.RecordUsage(ctx, rec.Usage.usage())
 	case opPruneUsage:
 		_, err = m.PruneUsage(ctx, rec.At)
+	case opToolPin:
+		if rec.Pin == nil || rec.Pin.Server == "" || rec.Pin.Tool == "" {
+			return errors.New("tool_pin line without a pin")
+		}
+		m.mu.Lock()
+		m.pins[pinKey{rec.Pin.Server, rec.Pin.Tool}] = *rec.Pin
+		m.mu.Unlock()
 	default:
 		return fmt.Errorf("unknown operation %q; was it written by a newer consequenced?", rec.Op)
 	}
@@ -249,6 +259,10 @@ func (f *File) writeSnapshot(path string) (int64, error) {
 	entries := append([]audit.Entry(nil), m.audit...)
 	approvals := append([]approval.Approval(nil), m.approvals...)
 	usage := append([]policy.UsageRecord(nil), m.usage...)
+	pins := make([]toolpin.Pin, 0, len(m.pins))
+	for _, p := range m.pins {
+		pins = append(pins, p)
+	}
 	receipts := make([]string, 0, len(m.receipts))
 	expiries := make(map[string]time.Time, len(m.receipts))
 	for id, exp := range m.receipts {
@@ -257,6 +271,7 @@ func (f *File) writeSnapshot(path string) (int64, error) {
 	}
 	m.mu.Unlock()
 	sort.Strings(receipts) // the same state always compacts to the same file
+	sortPins(pins)
 
 	w, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -291,6 +306,11 @@ func (f *File) writeSnapshot(path string) (int64, error) {
 	}
 	for _, u := range usage {
 		if err := emit(&record{Op: opUsage, Usage: newUsageRecord(u)}); err != nil {
+			return 0, err
+		}
+	}
+	for i := range pins {
+		if err := emit(&record{Op: opToolPin, Pin: &pins[i]}); err != nil {
 			return 0, err
 		}
 	}

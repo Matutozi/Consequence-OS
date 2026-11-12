@@ -18,7 +18,7 @@ export CONSEQUENCE_SIGNING_KEY_MLDSA87 ?= d981o8Ahw7SPWkniT-C-PSaH-CDeOSX9aZCCf4
 # and drop throwaway databases.
 TEST_DATABASE_URL ?= postgres://postgres:test@127.0.0.1:55432/postgres
 
-.PHONY: run check mock demo demo-approval demo-receipts demo-personal test test-postgres bench lint dist env up down logs
+.PHONY: run check mock demo demo-approval demo-receipts demo-personal demo-rug-pull test test-postgres bench lint dist env up down logs
 
 run:
 	go run ./cmd/consequenced -config $(CONFIG)
@@ -45,6 +45,10 @@ demo-receipts:
 # The Claude Code hook, set up and fed a dozen tool calls in a temporary folder.
 demo-personal:
 	./scripts/demo-personal.sh
+
+# A local MCP server changes a tool under the same command line; the pin catches it.
+demo-rug-pull:
+	./scripts/demo-rug-pull.sh
 
 test:
 	go test ./...

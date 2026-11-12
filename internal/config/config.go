@@ -116,6 +116,36 @@ type Config struct {
 	// questions to a person: some agent frameworks let the model answer
 	// them, and the agent would then approve its own calls.
 	StdioAskInClient bool `yaml:"stdio_ask_in_client"`
+
+	// ToolPins pins the definition of each tool the upstream lists, so
+	// the server can't change a tool under its old name. See
+	// internal/toolpin.
+	ToolPins ToolPins `yaml:"tool_pins"`
+}
+
+// ToolPins configures the pinning of tool definitions. It is on unless
+// disabled.
+type ToolPins struct {
+	// Disabled lets listings and arguments through unchecked.
+	Disabled bool `yaml:"disabled"`
+	// UnnamedArguments is what a call to a pinned tool gets when it sends
+	// an argument the tool's accepted input schema doesn't name: "refuse"
+	// (the default), or "allow" for a server whose schemas leave out
+	// arguments it takes.
+	UnnamedArguments string `yaml:"unnamed_arguments"`
+}
+
+// What tool_pins.unnamed_arguments may be.
+const (
+	UnnamedRefuse = "refuse"
+	UnnamedAllow  = "allow"
+)
+
+func (t ToolPins) validate() error {
+	if t.UnnamedArguments != UnnamedRefuse && t.UnnamedArguments != UnnamedAllow {
+		return fmt.Errorf("tool_pins.unnamed_arguments %q must be %s or %s", t.UnnamedArguments, UnnamedRefuse, UnnamedAllow)
+	}
+	return nil
 }
 
 // LocalAgent is the agent and owner the local modes record calls under.
@@ -232,6 +262,30 @@ func LoadLocal(path string, lookupEnv LookupEnv) (*Config, error) {
 	return cfg, nil
 }
 
+// LoadAny loads a config of either kind, for commands that work on both,
+// such as consequenced -tools: the server's when it names an upstream, and
+// a local mode's otherwise. local reports which it was.
+func LoadAny(path string, lookupEnv LookupEnv) (cfg *Config, local bool, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("read config: %w", err)
+	}
+	var probe map[string]any
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return nil, false, fmt.Errorf("%s: parse config: %w", path, err)
+	}
+	if _, server := probe["upstream"]; server {
+		cfg, err = Parse(data, lookupEnv)
+	} else {
+		cfg, err = ParseLocal(data, lookupEnv)
+		local = true
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("%s: %w", path, err)
+	}
+	return cfg, local, nil
+}
+
 // ParseLocal is Parse for the local modes, such as the Claude Code hook.
 // They need the policy, a state_dir to keep the audit log and limits
 // between calls, and optionally local_agent. The HTTP server's settings,
@@ -255,6 +309,9 @@ func ParseLocal(data []byte, lookupEnv LookupEnv) (*Config, error) {
 		if cfg.StdioEnvFile, err = absPath("stdio_env_file", cfg.StdioEnvFile, lookupEnv); err != nil {
 			return nil, err
 		}
+	}
+	if err := cfg.ToolPins.validate(); err != nil {
+		return nil, err
 	}
 	if cfg.StateDir == "" {
 		return nil, errors.New("state_dir is required here, e.g. state_dir: ~/.consequence, so the audit log and limits last from one call to the next")
@@ -383,6 +440,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.MaxPendingApprovals == 0 {
 		c.MaxPendingApprovals = DefaultMaxPending
+	}
+	if c.ToolPins.UnnamedArguments == "" {
+		c.ToolPins.UnnamedArguments = UnnamedRefuse
 	}
 	if c.DefaultAllowBelow == nil {
 		n := policy.DefaultAllowBelow
@@ -526,6 +586,9 @@ func (c *Config) validate() error {
 		return errors.New("email.from is set but email.smtp_url_env is not")
 	}
 	if err := validateOrigins(c.AllowedOrigins); err != nil {
+		return err
+	}
+	if err := c.ToolPins.validate(); err != nil {
 		return err
 	}
 	if u, err := url.Parse(c.PublicURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {

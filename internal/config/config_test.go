@@ -474,6 +474,33 @@ func TestNoReceiptWarningForAHostedUpstream(t *testing.T) {
 	}
 }
 
+func TestToolPins(t *testing.T) {
+	env := baseEnv(map[string]string{"KEY_SUPPORT": "k"})
+	cfg, err := Parse([]byte(validYAML), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ToolPins.Disabled || cfg.ToolPins.UnnamedArguments != UnnamedRefuse {
+		t.Errorf("defaults: %+v, want pins on and unnamed arguments refused", cfg.ToolPins)
+	}
+	cfg, err = Parse([]byte(validYAML+"tool_pins: { disabled: true, unnamed_arguments: allow }\n"), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ToolPins.Disabled || cfg.ToolPins.UnnamedArguments != UnnamedAllow {
+		t.Errorf("tool_pins = %+v", cfg.ToolPins)
+	}
+	for _, yml := range []string{validYAML + "tool_pins: { unnamed_arguments: ignore }\n", "state_dir: /tmp/x\ntool_pins: { unnamed_arguments: Allow }\n"} {
+		parse := Parse
+		if strings.HasPrefix(yml, "state_dir") {
+			parse = ParseLocal
+		}
+		if _, err := parse([]byte(yml), env); err == nil || !strings.Contains(err.Error(), "must be refuse or allow") {
+			t.Errorf("%q: err = %v", yml, err)
+		}
+	}
+}
+
 func TestStdioEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, "github.env")

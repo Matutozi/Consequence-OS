@@ -24,6 +24,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/consequence"
 	"github.com/matutozi/consequence-os/internal/policy"
 	"github.com/matutozi/consequence-os/internal/store"
+	"github.com/matutozi/consequence-os/internal/toolpin"
 	"github.com/matutozi/consequence-os/pkg/verify"
 )
 
@@ -38,8 +39,13 @@ type Options struct {
 	// means there is no approval service: the person is at the keyboard,
 	// and an asked call comes back AskUser for the adapter to ask them.
 	Approvals *approval.Service
-	Log       *slog.Logger
-	Now       func() time.Time // nil means time.Now; tests pass a fixed clock
+	// Tools checks calls against the upstream's pinned tool definitions:
+	// arguments the accepted schema doesn't name are refused, and a tool
+	// whose definition changed asks. nil means nothing is pinned, as for
+	// the Claude Code hook, whose tools come from no listing.
+	Tools *toolpin.Service
+	Log   *slog.Logger
+	Now   func() time.Time // nil means time.Now; tests pass a fixed clock
 }
 
 // Gate decides calls. It is safe for concurrent use.
@@ -48,6 +54,7 @@ type Gate struct {
 	resolver  consequence.Resolver
 	store     store.Store
 	approvals *approval.Service
+	tools     *toolpin.Service
 	log       *slog.Logger
 	now       func() time.Time
 	limits    keyedLocks // serializes calls covered by limit rules; see locks.go
@@ -60,6 +67,7 @@ func New(opts Options) (*Gate, error) {
 		resolver:  opts.Resolver,
 		store:     opts.Store,
 		approvals: opts.Approvals,
+		tools:     opts.Tools,
 		log:       opts.Log,
 		now:       opts.Now,
 	}
@@ -104,6 +112,9 @@ const (
 	// The call counts towards limits whatever they answer, since the gate
 	// never learns it: limits over-count rather than under-count.
 	AskUser
+	// Invalid: the arguments don't fit the tool's pinned input schema, so
+	// the policy never saw the call. Result.Reason says how.
+	Invalid
 )
 
 // Result is a decided call. Every verdict except Allowed and AskUser is
@@ -118,6 +129,12 @@ type Result struct {
 	// declined or was approved. ApprovedBy names who approved it.
 	Approval   approval.Approval
 	ApprovedBy string
+	// Reason says why an Invalid call was refused, in words for the agent.
+	Reason string
+	// ToolChanged means the upstream listed a definition of this tool
+	// other than the accepted one, so the call asks (or a deny rule still
+	// denies it) until a person accepts the change.
+	ToolChanged bool
 
 	g       *Gate
 	call    policy.Call
@@ -155,6 +172,22 @@ func (g *Gate) Decide(ctx context.Context, req Request) (*Result, error) {
 	if err != nil { // the adapter has already parsed them, but never decide on unhashed arguments
 		return nil, &Error{What: "arguments could not be hashed", BadArguments: true, Err: err}
 	}
+	toolChanged := false
+	if g.tools != nil && !policy.IsRead(req.Name) {
+		st, problem, err := g.tools.Check(ctx, req.Name, req.Args)
+		if err != nil {
+			g.log.Error("tool pin lookup failed", "tool", req.Name, "err", err)
+			return nil, &Error{What: "tool definitions unavailable", Err: err}
+		}
+		if problem != "" {
+			entry.Tool, entry.ParamsHash, entry.Summary = req.Name, hash, Summarize(req.Name, req.Args)
+			res := &Result{g: g, release: func() {}, Reason: problem}
+			res.Entry = entry
+			res.finish(ctx, Invalid, audit.OutcomeRejected, problem)
+			return res, nil
+		}
+		toolChanged = st == toolpin.Changed
+	}
 	// Assess before taking any lock: a resolver may be slow (a map lookup),
 	// and the assessment doesn't depend on other calls.
 	assessment, err := g.resolver.Assess(ctx, req.Name, req.Args)
@@ -164,6 +197,14 @@ func (g *Gate) Decide(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		g.log.Error("consequence assessment failed", "tool", req.Name, "err", err)
 		return nil, &Error{What: "consequence could not be assessed", Err: err}
+	}
+	if toolChanged {
+		// What the tool does now is unknown: assess it as a tool nobody
+		// has listed, so the score, the level and rules on them say so.
+		assessment.Reversibility = consequence.None
+		assessment.Score = max(assessment.Score, consequence.DefaultIrreversibleScore)
+		assessment.Reasons = append(assessment.Reasons, fmt.Sprintf(
+			"%s's definition changed since it was accepted, so it counts as irreversible until the change is accepted.", req.Name))
 	}
 	// With limit rules, this agent's calls in each limit scope that covers
 	// this tool go one at a time until the call is recorded, so parallel
@@ -178,6 +219,12 @@ func (g *Gate) Decide(ctx context.Context, req Request) (*Result, error) {
 		g.log.Error("policy decision failed", "tool", req.Name, "err", err)
 		return nil, &Error{What: "usage limits unavailable", Err: err}
 	}
+	if toolChanged && decision.Action != policy.ActionDeny {
+		// The rules were written for the definition that was accepted,
+		// not this one, so even an allow asks.
+		decision.Action, decision.Rule = policy.ActionAsk, toolpin.RuleChanged
+	}
+	res.ToolChanged = toolChanged
 	entry.Tool = req.Name
 	entry.ParamsHash = hash
 	entry.Summary = Summarize(req.Name, req.Args)

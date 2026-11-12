@@ -199,6 +199,9 @@ func (s *stdio) askInClient(msg message, call toolCall, res *gate.Result) bool {
 	for _, r := range a.Reasons {
 		question += " " + r
 	}
+	if res.ToolChanged {
+		question += fmt.Sprintf(" The server changed what %s says it does since it was accepted, so check the call with that in mind.", call.name)
+	}
 	if args != "" && args != "{}" {
 		question += " Arguments: " + args
 	}

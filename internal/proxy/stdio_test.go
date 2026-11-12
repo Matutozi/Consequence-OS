@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/gate"
 	"github.com/matutozi/consequence-os/internal/policy"
 	"github.com/matutozi/consequence-os/internal/store"
+	"github.com/matutozi/consequence-os/internal/toolpin"
 )
 
 // TestHelperStdioServer is not a test: the stdio tests run the test binary
@@ -53,6 +55,12 @@ func TestHelperStdioServer(t *testing.T) {
 			if m.Params.Name == "die" {
 				os.Exit(3)
 			}
+			// tools/list is answered with the line in
+			// $CONSEQUENCE_TEST_TOOLS, $ID replaced, when there is one.
+			if listing, err := os.ReadFile(os.Getenv("CONSEQUENCE_TEST_TOOLS")); err == nil && m.Method == "tools/list" {
+				os.Stdout.Write(append(bytes.ReplaceAll(bytes.TrimSpace(listing), []byte("$ID"), m.ID), '\n'))
+				continue
+			}
 			if len(m.ID) > 0 && m.Method != "" {
 				answer, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": m.ID,
 					"result": map[string]any{"content": []map[string]any{{"type": "text", "text": "ran " + m.Method + " " + m.Params.Name}}}})
@@ -68,14 +76,25 @@ func TestHelperStdioServer(t *testing.T) {
 type stdioFixture struct {
 	t         *testing.T
 	toWrapper *io.PipeWriter
-	lines     chan string // what the client got
-	done      chan error  // RunStdio's result
+	lines     chan string   // what the client got
+	done      chan error    // RunStdio's result
+	finished  chan struct{} // closed once RunStdio has returned
 	serverLog string
 	stateDir  string
+	toolsFile string // the server's answer to tools/list; see TestHelperStdioServer
 	engine    *policy.Engine
+	pins      bool // calls and listings are checked against pinned tools
 }
 
 func newStdioFixture(t *testing.T, edits ...func(*StdioOptions)) *stdioFixture {
+	t.Helper()
+	return newStdioFixtureWith(t, false, edits...)
+}
+
+// stdioServerName is what the stdio tests pin tools under.
+const stdioServerName = "stdio: test-server"
+
+func newStdioFixtureWith(t *testing.T, pins bool, edits ...func(*StdioOptions)) *stdioFixture {
 	t.Helper()
 	engine, err := policy.NewEngine([]policy.Rule{
 		{Name: "small-refunds", Tool: "payments.refund", When: policy.Conditions{{Arg: "amount", Op: policy.OpLte, Value: 50}}, Action: policy.ActionAllow},
@@ -87,8 +106,9 @@ func newStdioFixture(t *testing.T, edits ...func(*StdioOptions)) *stdioFixture {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	f := &stdioFixture{t: t, lines: make(chan string, 100), done: make(chan error, 1),
-		serverLog: filepath.Join(dir, "received.jsonl"), stateDir: filepath.Join(dir, "state"), engine: engine}
+	f := &stdioFixture{t: t, lines: make(chan string, 100), done: make(chan error, 1), finished: make(chan struct{}),
+		serverLog: filepath.Join(dir, "received.jsonl"), stateDir: filepath.Join(dir, "state"), engine: engine,
+		toolsFile: filepath.Join(dir, "tools.json"), pins: pins}
 
 	clientIn, toWrapper := io.Pipe()
 	fromWrapper, clientOut := io.Pipe()
@@ -107,13 +127,16 @@ func newStdioFixture(t *testing.T, edits ...func(*StdioOptions)) *stdioFixture {
 	}()
 	opts := StdioOptions{
 		Command: []string{os.Args[0], "-test.run=^TestHelperStdioServer$"},
-		Env: []string{"CONSEQUENCE_TEST_SERVER_LOG=" + f.serverLog, "SECRET_FOR_SERVER=s3cret",
+		Env: []string{"CONSEQUENCE_TEST_SERVER_LOG=" + f.serverLog, "SECRET_FOR_SERVER=s3cret", "CONSEQUENCE_TEST_TOOLS=" + f.toolsFile,
 			"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")},
 		Stderr: io.Discard, AgentID: "local", OwnerID: "local",
 		Open:           f.open,
 		ApproveCommand: func(id string) string { return "consequenced -approve " + id },
 		LocalUser:      "local:ada",
 		Log:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	if pins {
+		opts.OpenTools = f.openTools
 	}
 	for _, edit := range edits {
 		edit(&opts)
@@ -122,8 +145,18 @@ func newStdioFixture(t *testing.T, edits ...func(*StdioOptions)) *stdioFixture {
 		err := RunStdio(context.Background(), clientIn, clientOut, opts)
 		clientOut.Close()
 		f.done <- err
+		close(f.finished)
 	}()
-	t.Cleanup(func() { toWrapper.Close() })
+	// Wait for the wrapper and its server to exit before the temporary
+	// directory is removed: they may still be writing in it.
+	t.Cleanup(func() {
+		toWrapper.Close()
+		select {
+		case <-f.finished:
+		case <-time.After(10 * time.Second):
+			t.Error("the wrapper didn't exit after the client closed stdin")
+		}
+	})
 	return f
 }
 
@@ -135,13 +168,46 @@ func (f *stdioFixture) open(context.Context) (*gate.Gate, *approval.Service, fun
 		return nil, nil, nil, err
 	}
 	svc := f.approvals(st)
-	g, err := gate.New(gate.Options{Engine: f.engine, Store: st, Approvals: svc, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	var tools *toolpin.Service
+	if f.pins {
+		if tools, err = f.toolService(st); err != nil {
+			st.Close()
+			return nil, nil, nil, err
+		}
+	}
+	g, err := gate.New(gate.Options{Engine: f.engine, Store: st, Approvals: svc, Tools: tools, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		st.Close()
 		return nil, nil, nil, err
 	}
 	var once sync.Once
 	return g, svc, func() { once.Do(st.Close) }, nil
+}
+
+func (f *stdioFixture) toolService(st store.Store) (*toolpin.Service, error) {
+	return toolpin.New(toolpin.Options{Repo: st, Audit: st, Server: stdioServerName, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+}
+
+// openTools is what consequenced -stdio's OpenTools does.
+func (f *stdioFixture) openTools(context.Context) (*toolpin.Service, func(), error) {
+	st, err := store.OpenFile(f.stateDir, store.FileOptions{LockTimeout: 200 * time.Millisecond})
+	if err != nil {
+		return nil, nil, err
+	}
+	tools, err := f.toolService(st)
+	if err != nil {
+		st.Close()
+		return nil, nil, err
+	}
+	return tools, st.Close, nil
+}
+
+// serverLists sets the line the server answers tools/list with.
+func (f *stdioFixture) serverLists(line string) {
+	f.t.Helper()
+	if err := os.WriteFile(f.toolsFile, []byte(line), 0o600); err != nil {
+		f.t.Fatal(err)
+	}
 }
 
 func (f *stdioFixture) approvals(st store.Store) *approval.Service {

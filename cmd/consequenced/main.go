@@ -6,6 +6,8 @@
 //	consequenced -tool payments.refund -args '{...}' show the assessment and policy decision for one call
 //	             [-at 2026-11-02T22:00:00Z]          ...as if made at that time
 //	consequenced -verify-audit                       check the stored audit log's hash chain
+//	consequenced -tools                              list the pinned tool definitions
+//	consequenced -accept-tool notes.read             accept a changed tool definition, after asking on the terminal
 //	consequenced -genkeys                            print fresh receipt signing keys
 //	consequenced -version                            print the version
 package main
@@ -40,6 +42,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/proxy"
 	"github.com/matutozi/consequence-os/internal/receipt"
 	"github.com/matutozi/consequence-os/internal/store"
+	"github.com/matutozi/consequence-os/internal/toolpin"
 	"github.com/matutozi/consequence-os/pkg/verify"
 )
 
@@ -115,6 +118,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	reject := fs.Bool("reject", false, "with -approve: reject the call instead")
 	showLog := fs.Bool("log", false, "print recent decisions from the audit log and exit")
 	logCount := fs.Int("n", 20, "with -log: how many decisions to print")
+	listTools := fs.Bool("tools", false, "list the pinned tool definitions, and rules whose arguments their schemas don't have, and exit")
+	acceptTool := fs.String("accept-tool", "", "accept the changed definition of this tool, asking you on the terminal first")
+	serverName := fs.String("server", "", "with -tools or -accept-tool: only this server's tools, named as -tools shows it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -130,6 +136,16 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 	if *initName != "" {
 		return runInit(*initName, *configPath, *global, *yes, out)
+	}
+	if *listTools || *acceptTool != "" {
+		cfg, isLocal, err := loadToolsConfig(*configPath, configSet)
+		if err != nil {
+			return err
+		}
+		if *acceptTool != "" {
+			return runAcceptTool(ctx, cfg, isLocal, *acceptTool, *serverName, out)
+		}
+		return printTools(ctx, out, cfg, *serverName)
 	}
 	if *stdioMode || *approveID != "" {
 		cfg, err := config.LoadLocal(*configPath, os.LookupEnv)
@@ -296,10 +312,27 @@ func runStdio(ctx context.Context, cfg *config.Config, command []string, approve
 	for _, w := range engine.Warnings() {
 		log.Warn("policy: " + w)
 	}
+	server := toolpin.StdioServer(command)
+	var openTools func(context.Context) (*toolpin.Service, func(), error)
+	if !cfg.ToolPins.Disabled {
+		openTools = func(context.Context) (*toolpin.Service, func(), error) {
+			st, err := store.OpenFile(cfg.StateDir, store.FileOptions{Log: log, LockTimeout: hook.DefaultLockTimeout})
+			if err != nil {
+				return nil, nil, err
+			}
+			tools, err := toolService(cfg, st, server, log)
+			if err != nil {
+				st.Close()
+				return nil, nil, err
+			}
+			return tools, st.Close, nil
+		}
+	}
 	return proxy.RunStdio(ctx, stdin, out, proxy.StdioOptions{
 		Command: command, Env: env, Stderr: errOut,
 		AgentID: cfg.LocalAgent.ID, OwnerID: cfg.LocalAgent.OwnerID,
-		Open:           localGate(cfg, engine, log),
+		Open:           localGate(cfg, engine, log, server),
+		OpenTools:      openTools,
 		ApproveCommand: approveCmd,
 		AskInClient:    cfg.StdioAskInClient,
 		LocalUser:      localUser(),
@@ -320,15 +353,21 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 }
 
 // localGate opens the gate for one call in a local mode: the file store,
-// and approvals decided with consequenced -approve.
-func localGate(cfg *config.Config, engine *policy.Engine, log *slog.Logger) func(context.Context) (*gate.Gate, *approval.Service, func(), error) {
+// and approvals decided with consequenced -approve. Calls are checked
+// against the pinned tools of server.
+func localGate(cfg *config.Config, engine *policy.Engine, log *slog.Logger, server string) func(context.Context) (*gate.Gate, *approval.Service, func(), error) {
 	return func(context.Context) (*gate.Gate, *approval.Service, func(), error) {
 		st, err := store.OpenFile(cfg.StateDir, store.FileOptions{Log: log, LockTimeout: hook.DefaultLockTimeout})
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		tools, err := toolService(cfg, st, server, log)
+		if err != nil {
+			st.Close()
+			return nil, nil, nil, err
+		}
 		svc := localApprovals(cfg, st, log)
-		g, err := gate.New(gate.Options{Engine: engine, Store: st, Approvals: svc, Log: log})
+		g, err := gate.New(gate.Options{Engine: engine, Store: st, Approvals: svc, Tools: tools, Log: log})
 		if err != nil {
 			st.Close()
 			return nil, nil, nil, err
@@ -490,6 +529,10 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 		Notifier:   notifier,
 		Log:        log,
 	})
+	tools, err := toolService(cfg, st, toolpin.HTTPServer(cfg.Upstream), log)
+	if err != nil {
+		return err
+	}
 	px, err := proxy.New(proxy.Options{
 		Upstream:       cfg.Upstream,
 		Agents:         cfg.Agents,
@@ -500,6 +543,7 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 		Receipts:       receipt.NewIssuer(keys, cfg.PublicURL, cfg.Receipts.TTL, nil),
 		Receiver:       cfg.UpstreamReceiver,
 		UpstreamAuth:   cfg.UpstreamAuth,
+		Tools:          tools,
 		Log:            log,
 	})
 	if err != nil {

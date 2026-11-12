@@ -16,6 +16,7 @@ import (
 	"github.com/matutozi/consequence-os/internal/approval"
 	"github.com/matutozi/consequence-os/internal/audit"
 	"github.com/matutozi/consequence-os/internal/gate"
+	"github.com/matutozi/consequence-os/internal/toolpin"
 	"github.com/matutozi/consequence-os/pkg/verify"
 )
 
@@ -44,6 +45,11 @@ type StdioOptions struct {
 	// the same state_dir between calls: consequenced -approve, or another
 	// wrapper for another server.
 	Open func(ctx context.Context) (*gate.Gate, *approval.Service, func(), error)
+	// OpenTools opens the pins of this server's tool definitions for one
+	// tools/list answer, and returns the function that closes them. nil
+	// passes listings through unchecked. The gate Open returns checks
+	// calls against the same pins.
+	OpenTools func(ctx context.Context) (*toolpin.Service, func(), error)
 	// ApproveCommand is the command a person runs to approve a held call.
 	ApproveCommand func(approvalID string) string
 	// AskInClient asks the person through the MCP client about held calls,
@@ -85,7 +91,7 @@ func RunStdio(ctx context.Context, in io.Reader, out io.Writer, opts StdioOption
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("stdio: start %s: %w", opts.Command[0], err)
 	}
-	s := &stdio{opts: opts, client: &lineWriter{w: out}, server: toServer, waiting: map[string]bool{}, askKey: newAskKey()}
+	s := &stdio{opts: opts, client: &lineWriter{w: out}, server: toServer, waiting: map[string]bool{}, listings: map[string]json.RawMessage{}, askKey: newAskKey()}
 
 	serverDone := make(chan struct{})
 	go func() {
@@ -125,6 +131,9 @@ type stdio struct {
 
 	mu      sync.Mutex
 	waiting map[string]bool // IDs of requests sent to the server and not yet answered
+	// listings holds the tools/list requests not yet answered: each ID in
+	// canonical form (listingID), and as the client sent it.
+	listings map[string]json.RawMessage
 }
 
 // lineWriter writes whole lines, one writer at a time: our answers and the
@@ -149,16 +158,25 @@ func (l *lineWriter) writeJSON(v any) {
 }
 
 // relayFromServer copies the server's messages to the client, noting each
-// answer to a request that was waiting.
+// answer to a request that was waiting, and checking tool listings.
 func (s *stdio) relayFromServer(r io.Reader) {
 	br := bufio.NewReader(r)
 	for {
 		line, err := br.ReadBytes('\n')
+		if len(bytes.TrimSpace(line)) > 0 && s.unreadableWhileListing(line) {
+			line = nil // dropped; every listing waiting was answered with an error
+		}
 		if len(bytes.TrimSpace(line)) > 0 {
 			if id, ok := responseID(line); ok {
+				key, _ := listingID(json.RawMessage(id))
 				s.mu.Lock()
 				delete(s.waiting, id)
+				_, isListing := s.listings[key]
+				delete(s.listings, key)
 				s.mu.Unlock()
+				if isListing {
+					line = s.checkListing(json.RawMessage(id), line)
+				}
 			}
 			_ = s.client.writeLine(line)
 		}
@@ -166,6 +184,46 @@ func (s *stdio) relayFromServer(r io.Reader) {
 			return
 		}
 	}
+}
+
+// unreadableWhileListing reports whether line is not strict JSON while a
+// tools/list waits for its answer. Such a line can't be matched to an ID,
+// yet a lenient client might read it as the listing (Python's json accepts
+// NaN, say), so it is dropped, and each listing waiting is answered with
+// an error rather than left to hang.
+func (s *stdio) unreadableWhileListing(line []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.listings) == 0 {
+		return false
+	}
+	if _, err := verify.Canonicalize(bytes.TrimSpace(line)); err == nil {
+		return false
+	}
+	s.opts.Log.Error("dropped a message from the server that isn't strict JSON, while a tool list was waiting; the list wasn't passed on")
+	for key, id := range s.listings {
+		s.client.writeJSON(errorResponse(id, codeInternalError, errUncheckedListing.Error()))
+		delete(s.listings, key)
+		delete(s.waiting, string(id))
+	}
+	return true
+}
+
+// checkListing returns the answer to a tools/list with its tools checked
+// against their pins, or an error answer when they couldn't be.
+func (s *stdio) checkListing(id json.RawMessage, line []byte) []byte {
+	ctx := context.Background()
+	tools, closeTools, err := s.opts.OpenTools(ctx)
+	if err == nil {
+		defer closeTools()
+		var out []byte
+		if out, err = filterListing(ctx, tools, toolpin.Lister{AgentID: s.opts.AgentID, OwnerID: s.opts.OwnerID}, line); err == nil {
+			return out
+		}
+	}
+	s.opts.Log.Error("tool list not passed on", "err", err)
+	answer, _ := marshalRaw(errorResponse(id, codeInternalError, errUncheckedListing.Error()))
+	return answer
 }
 
 // responseID returns the ID of a JSON-RPC response, or ok=false for a
@@ -260,6 +318,9 @@ func (s *stdio) forward(msg message, line []byte) error {
 	if msg.method != "" && len(msg.id) > 0 {
 		s.mu.Lock()
 		s.waiting[string(msg.id)] = true
+		if key, ok := listingID(msg.id); ok && msg.method == methodToolsList && s.opts.OpenTools != nil {
+			s.listings[key] = msg.id
+		}
 		s.mu.Unlock()
 	}
 	if _, err := s.server.Write(append(append([]byte(nil), line...), '\n')); err != nil {
@@ -328,6 +389,8 @@ func (s *stdio) handleCall(ctx context.Context, msg message, line []byte) error 
 			"Tell the user requests are waiting for their decision, and try again after they decide.", approvals.MaxPending(), call.what())))
 	case gate.Declined:
 		s.client.writeJSON(refusal(msg, call, fmt.Sprintf("Rejected: the user declined %s (approval %s). Do not retry it; tell the user it was declined.", call.what(), res.Approval.ID)))
+	case gate.Invalid:
+		s.client.writeJSON(refusal(msg, call, invalidText(res)))
 	default: // gate.Held
 		if !dismissedIt && s.askInClient(msg, call, res) {
 			return nil
@@ -340,6 +403,7 @@ func (s *stdio) handleCall(ctx context.Context, msg message, line []byte) error 
 		if !a.ExpiresAt.IsZero() {
 			text += fmt.Sprintf(" If nobody decides by %s, the request expires.", a.ExpiresAt.Format(time.RFC3339))
 		}
+		text += changedText(res, call)
 		s.client.writeJSON(refusal(msg, call, text))
 	}
 	return nil
