@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -98,6 +99,18 @@ func (c *Client) Verify(ctx context.Context, receipt []byte, tool string, argume
 // Offline verifies signatures, expiry, audience, tool and arguments with a
 // local key set, without contacting the server. It cannot enforce single
 // use; pair it with your own record of used receipt IDs if you rely on it alone.
+//
+// When the server rotates its keys, receipts start naming a key Keys
+// doesn't have. With Refresh set, Offline then gets the keys again, at
+// most once every RefreshEvery, and tries once more:
+//
+//	v := &verify.Offline{Keys: keys, Audience: "payments-api",
+//		Refresh: func(ctx context.Context) (*verify.KeySet, error) {
+//			return verify.FetchKeys(ctx, nil, "https://consequence.example")
+//		}}
+//
+// Keys may start nil when Refresh is set: the first receipt fetches them.
+// Use a pointer: Offline holds a lock while it swaps the keys.
 type Offline struct {
 	Keys *KeySet
 	// Audience is this receiver's ID, as listed under receivers in the
@@ -105,15 +118,31 @@ type Offline struct {
 	// without it every v1 receipt is.
 	Audience string
 	Now      func() time.Time // nil means time.Now
+	// Refresh gets the server's keys again; nil never does.
+	Refresh func(ctx context.Context) (*KeySet, error)
+	// RefreshEvery is the least time between two refreshes; 0 means a
+	// minute. It keeps receipts naming made-up keys from making Offline
+	// fetch the keys over and over.
+	RefreshEvery time.Duration
+
+	mu          sync.Mutex
+	refreshedAt time.Time
 }
 
 // Verify implements Verifier.
-func (o *Offline) Verify(_ context.Context, receipt []byte, tool string, arguments []byte) (*Receipt, error) {
+func (o *Offline) Verify(ctx context.Context, receipt []byte, tool string, arguments []byte) (*Receipt, error) {
 	now := time.Now
 	if o.Now != nil {
 		now = o.Now
 	}
-	r, err := VerifyOffline(trimQuotes(receipt), o.Keys, now())
+	receipt = trimQuotes(receipt)
+	if o.keys() == nil && !o.refresh(ctx, now()) {
+		return nil, fmt.Errorf("%w: no keys loaded", ErrUnknownKey)
+	}
+	r, err := VerifyOffline(receipt, o.keys(), now())
+	if errors.Is(err, ErrUnknownKey) && o.refresh(ctx, now()) {
+		r, err = VerifyOffline(receipt, o.keys(), now())
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +153,41 @@ func (o *Offline) Verify(_ context.Context, receipt []byte, tool string, argumen
 		return nil, err
 	}
 	return r, nil
+}
+
+func (o *Offline) keys() *KeySet {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.Keys
+}
+
+// refresh gets the keys again, unless it did so less than RefreshEvery
+// ago. It reports whether the keys were replaced. A failed fetch keeps
+// the keys there were.
+func (o *Offline) refresh(ctx context.Context, now time.Time) bool {
+	if o.Refresh == nil {
+		return false
+	}
+	every := o.RefreshEvery
+	if every <= 0 {
+		every = time.Minute
+	}
+	o.mu.Lock()
+	if !o.refreshedAt.IsZero() && now.Sub(o.refreshedAt) < every {
+		o.mu.Unlock()
+		return false
+	}
+	o.refreshedAt = now // claimed before fetching, so concurrent misses fetch once
+	o.mu.Unlock()
+
+	keys, err := o.Refresh(ctx)
+	if err != nil || keys == nil {
+		return false
+	}
+	o.mu.Lock()
+	o.Keys = keys
+	o.mu.Unlock()
+	return true
 }
 
 func emptyAsObject(args []byte) json.RawMessage {

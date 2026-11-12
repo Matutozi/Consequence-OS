@@ -648,3 +648,100 @@ func TestToolsAndAcceptTool(t *testing.T) {
 		t.Errorf("-log:\n%s", out)
 	}
 }
+
+// Rotating the signing keys: -jwks prints the old public keys, which go in
+// previous_keys_env with the new keys. A head the old keys signed still
+// verifies, during the window and after it.
+func TestKeyRotation(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "state")
+	path := writeTestConfig(t, "state_dir: "+dir+"\n")
+	cli := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		err := run(ctx, append([]string{"-config", path}, args...), &out)
+		return out.String(), err
+	}
+
+	st, err := store.OpenFile(dir, store.FileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := st.AppendAudit(ctx, audit.Entry{Time: time.Now(), AgentID: "a", OwnerID: "o", Tool: "x", Outcome: audit.OutcomeForwarded}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	last, _, _ := st.LastAudit(ctx)
+	st.Close()
+	oldKeys, err := receipt.LoadKeys(os.Getenv("TEST_CONSEQUENCED_ED"), os.Getenv("TEST_CONSEQUENCED_ML"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := oldKeys.SignAuditHead("http://127.0.0.1:8080", last.Seq, last.Hash, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	headFile := filepath.Join(t.TempDir(), "head.json")
+	if err := os.WriteFile(headFile, head, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli("-verify-audit", "-audit-head", headFile); err != nil {
+		t.Fatalf("before the rotation: %v", err)
+	}
+	oldJWKS, err := cli("-jwks")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Rotate: new seeds, and the old public keys as the previous ones.
+	ed, ml, err := receipt.GenerateSeeds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_CONSEQUENCED_ED", ed)
+	t.Setenv("TEST_CONSEQUENCED_ML", ml)
+	t.Setenv("TEST_OLD_KEYS", strings.TrimSpace(oldJWKS))
+	rotated := func(until time.Time) {
+		t.Helper()
+		cfg := strings.Replace(testConfig, "mldsa87_key_env: TEST_CONSEQUENCED_ML }",
+			"mldsa87_key_env: TEST_CONSEQUENCED_ML, previous_keys_env: TEST_OLD_KEYS, previous_keys_until: "+until.UTC().Format(time.RFC3339)+" }", 1)
+		if err := os.WriteFile(path, []byte(cfg+"state_dir: "+dir+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rotated(time.Now().Add(time.Hour))
+	if out, err := cli("-check"); err != nil || !strings.Contains(out, "previous keys:     from $TEST_OLD_KEYS, accepted for receipts until") {
+		t.Errorf("-check during the window: %v\n%s", err, out)
+	}
+	if _, err := cli("-verify-audit", "-audit-head", headFile); err != nil {
+		t.Errorf("a head the old keys signed, during the window: %v", err)
+	}
+	if out, _ := cli("-jwks"); strings.Count(out, `"kid"`) != 4 {
+		t.Errorf("-jwks after the rotation: %s, want all 4 keys, for the next rotation", out)
+	}
+
+	rotated(time.Now().Add(-time.Minute))
+	if out, err := cli("-check"); err != nil || !strings.Contains(out, "for audit heads only") {
+		t.Errorf("-check after the window: %v\n%s", err, out)
+	}
+	if _, err := cli("-verify-audit", "-audit-head", headFile); err != nil {
+		t.Errorf("a head the old keys signed, after the window: %v", err)
+	}
+
+	// Without the previous keys, the old head can't be checked.
+	if err := os.WriteFile(path, []byte(testConfig+"state_dir: "+dir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli("-verify-audit", "-audit-head", headFile); err == nil || !strings.Contains(err.Error(), "unknown key") {
+		t.Errorf("without the previous keys: %v", err)
+	}
+
+	// The current keys can't be listed as previous: -check refuses.
+	newJWKS, _ := cli("-jwks")
+	t.Setenv("TEST_OLD_KEYS", strings.TrimSpace(newJWKS))
+	rotated(time.Now().Add(time.Hour))
+	if _, err := cli("-check"); err == nil || !strings.Contains(err.Error(), "is a current signing key") {
+		t.Errorf("the current keys as previous: %v", err)
+	}
+}

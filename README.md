@@ -392,7 +392,7 @@ Inside your handler, `verify.FromContext(r.Context())` returns the verified rece
 
 `verify.NewClient` makes one call per tool call, to `POST /v1/receipts/verify`. That one call checks the signatures, the expiry, the audience, the tool, the arguments and single use. The server knows the audience from the receiver's key.
 
-The verify endpoint needs a receiver key. Each check uses the receipt up, so without a key anyone could use receipts up before the real receiver sees them. List each receiver under `receivers` in the config, with the env var that holds its key, and give the receiver the same key. With no receivers listed, the endpoint refuses every call. To check without contacting the server, fetch the keys once with `verify.FetchKeys` and use `&verify.Offline{Keys: keys, Audience: "payments-api"}`, with your own receiver ID. Offline checking can't enforce single use, so keep your own record of used receipt IDs.
+The verify endpoint needs a receiver key. Each check uses the receipt up, so without a key anyone could use receipts up before the real receiver sees them. List each receiver under `receivers` in the config, with the env var that holds its key, and give the receiver the same key. With no receivers listed, the endpoint refuses every call. To check without contacting the server, use `&verify.Offline{Audience: "payments-api", Refresh: ...}`, with your own receiver ID and a `Refresh` that calls `verify.FetchKeys`. It fetches the keys on the first receipt, and again when a receipt names a key it doesn't have, as happens after a [key rotation](docs/receivers.md#rotating-the-signing-keys). Offline checking can't enforce single use, so keep your own record of used receipt IDs.
 
 ### Protecting a receiver in Python
 
@@ -462,7 +462,7 @@ One YAML file names everything, and secrets live in environment variables that t
 | `stdio_env_file` | For `-stdio`: a file of `NAME=value` lines for the wrapped server, such as its token, readable by its owner alone. Absolute or `~/` |
 | `stdio_ask_in_client` | For `-stdio`: ask about held calls through the MCP client, when it can show forms (2026-07-28 clients). Only for clients that show the question to a person. Default `false` |
 | `tool_pins` | `disabled: true` stops pinning tool definitions; `unnamed_arguments: allow` lets through arguments a pinned schema doesn't name (default `refuse`). See [Tool definitions](#tool-definitions) |
-| `receipts` | `ttl` (default `5m`), `ed25519_key_env`, `mldsa87_key_env` |
+| `receipts` | `ttl` (default `5m`), `ed25519_key_env`, `mldsa87_key_env`. After a key rotation, `previous_keys_env` names an env var holding the old public keys (what `consequenced -jwks` printed), and `previous_keys_until` says until when receipts signed with them are accepted. Audit heads they signed always verify. See [Rotating the signing keys](docs/receivers.md#rotating-the-signing-keys) |
 | `database_url_env` | Env var holding a Postgres URL |
 | `state_dir` | A directory for the file store, e.g. `~/.consequence`: absolute, or starting with `~/`. Set this or `database_url_env`, not both. With neither, everything is kept in memory |
 | `email` | `smtp_url_env` (e.g. `smtp://user:pass@smtp.example.com:587`, or `smtps://…:465`) and `from`. Without it, approver links go to the server log |
@@ -613,7 +613,8 @@ This is an early MVP. Built:
 - receipt v1, which names its receiver and carries the call's consequence;
 - a file store, which keeps state on one machine across restarts with no database;
 - a Claude Code hook, which applies the policy to Claude Code's built-in tools;
-- pinned tool definitions: a changed tool is hidden from the model and asks until accepted, and arguments its schema doesn't name are refused.
+- pinned tool definitions: a changed tool is hidden from the model and asks until accepted, and arguments its schema doesn't name are refused;
+- signing key rotation, with old keys kept for saved audit heads, and offline receivers that pick up new keys by themselves.
 
 Not yet:
 - passkey-signed approvals.

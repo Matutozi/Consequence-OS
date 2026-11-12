@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/matutozi/consequence-os/internal/policy"
+	"github.com/matutozi/consequence-os/internal/receipt"
 )
 
 // base holds the settings every valid config needs besides upstream and agents.
@@ -539,5 +541,61 @@ func TestStdioEnvironment(t *testing.T) {
 	}
 	if _, err := ParseLocal([]byte("state_dir: /x\nstdio_env_file: relative.env\n"), lookup); err == nil {
 		t.Error("a relative stdio_env_file was accepted")
+	}
+}
+
+// previousJWKS returns real public keys as a JWKS, for previous_keys_env.
+func previousJWKS(t *testing.T) string {
+	t.Helper()
+	ed, ml, err := receipt.GenerateSeeds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := receipt.LoadKeys(ed, ml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(keys.JWKS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestPreviousKeys(t *testing.T) {
+	withReceipts := func(receipts string) string {
+		return strings.Replace(validYAML, "receipts: { ed25519_key_env: ED_KEY, mldsa87_key_env: ML_KEY }", "receipts: "+receipts, 1)
+	}
+	env := func(previous string) LookupEnv {
+		return baseEnv(map[string]string{"KEY_SUPPORT": "k", "OLD_KEYS": previous})
+	}
+	jwks := previousJWKS(t)
+
+	for _, until := range []string{"2026-11-20T00:00:00Z", `"2026-11-20T00:00:00Z"`} {
+		cfg, err := Parse([]byte(withReceipts("{ ed25519_key_env: ED_KEY, mldsa87_key_env: ML_KEY, previous_keys_env: OLD_KEYS, previous_keys_until: "+until+" }")), env(jwks))
+		if err != nil {
+			t.Fatalf("until %s: %v", until, err)
+		}
+		if cfg.Receipts.PreviousKeys != jwks || !cfg.Receipts.PreviousKeysUntil.Equal(time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)) {
+			t.Errorf("until %s: %+v", until, cfg.Receipts)
+		}
+	}
+	for name, tt := range map[string]struct{ receipts, env, want string }{
+		"until without keys": {"{ ed25519_key_env: ED_KEY, mldsa87_key_env: ML_KEY, previous_keys_until: 2026-11-20T00:00:00Z }", jwks,
+			"previous_keys_until is set but receipts.previous_keys_env is not"},
+		"keys without until": {"{ ed25519_key_env: ED_KEY, mldsa87_key_env: ML_KEY, previous_keys_env: OLD_KEYS }", jwks,
+			"previous_keys_until is required"},
+		"env var empty": {"{ ed25519_key_env: ED_KEY, mldsa87_key_env: ML_KEY, previous_keys_env: OLD_KEYS, previous_keys_until: 2026-11-20T00:00:00Z }", " ",
+			"OLD_KEYS (receipts.previous_keys_env) is not set"},
+		"not a JWKS": {"{ ed25519_key_env: ED_KEY, mldsa87_key_env: ML_KEY, previous_keys_env: OLD_KEYS, previous_keys_until: 2026-11-20T00:00:00Z }", "ed-seed",
+			"env var OLD_KEYS (receipts.previous_keys_env): verify: bad JWKS"},
+		"until not a time": {"{ ed25519_key_env: ED_KEY, mldsa87_key_env: ML_KEY, previous_keys_env: OLD_KEYS, previous_keys_until: tomorrow }", jwks,
+			"previous_keys_until"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte(withReceipts(tt.receipts)), env(tt.env)); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("err = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
