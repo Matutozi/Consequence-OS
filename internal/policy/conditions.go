@@ -87,15 +87,11 @@ func (c Conditions) each(field string, check func(Condition) error) error {
 }
 
 // matches reports whether every condition holds. An empty list always
-// matches. loose also accepts argument names that differ in letter case;
-// see Condition.matchesLoosely.
+// matches. loose is how deny and ask rules judge a condition, and its
+// opposite how allow rules do; see Condition.holds.
 func (c Conditions) matches(args map[string]any, loose bool) bool {
 	for _, cond := range c {
-		ok := cond.matches(args)
-		if !ok && loose {
-			ok = cond.matchesLoosely(args)
-		}
-		if !ok {
+		if !cond.holds(args, loose) {
 			return false
 		}
 	}
