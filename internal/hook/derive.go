@@ -51,6 +51,12 @@ var pathTools = map[string]struct {
 	"LS":           {arg: "path", optional: true},
 }
 
+// Derive adds the arguments the hook derives for one call to args, in
+// place, as the hook does before the policy sees it: consequenced -test
+// uses it to test a hook policy. cwd is where Claude Code is working;
+// project is the project directory.
+func Derive(tool string, args map[string]any, cwd, project string) { derive(tool, args, cwd, project) }
+
 // derive adds the derived arguments for one call to args, in place. cwd is
 // where Claude Code is working; project is the project directory.
 func derive(tool string, args map[string]any, cwd, project string) {

@@ -1,0 +1,86 @@
+# Policy tests for consequence.yaml. Run them with:
+#
+#   consequenced -test consequence.test.yaml
+#
+# Each case is a call and the decision it should get. A change to the
+# policy that changes one of these decisions fails the run, so CI can
+# catch it before the change goes live.
+config: consequence.yaml
+at: 2026-11-16T10:00:00+01:00   # a Monday morning, so time windows give the same answer every run
+require_every_rule: true        # every rule must be reached by some case
+
+cases:
+  - name: a small order from a trusted supplier goes through
+    tool: purchase_order.confirm
+    args: { amount: 480, supplier: Coleman Cables }
+    want: allow
+    rule: small-po-trusted-supplier
+  - name: the same order from another supplier needs a manager
+    tool: purchase_order.confirm
+    args: { amount: 480, supplier: Cheap Wires Ltd }
+    want: ask
+    rule: po-needs-manager
+  - name: a big order needs a manager, whoever supplies it
+    tool: purchase_order.confirm
+    args: { amount: 4800, supplier: Acme Steel }
+    want: ask
+    rule: po-needs-manager
+
+  - name: a small refund goes through
+    tool: payments.refund
+    args: { charge_id: ch_1, amount: 20 }
+    want: allow
+    rule: small-refunds
+  - name: small refunds stop at 500 a day
+    tool: payments.refund
+    args: { charge_id: ch_1, amount: 20 }
+    before: [{ args: { charge_id: ch_0, amount: 50 }, ago: 3h, times: 10 }]
+    want: ask
+    rule: small-refunds-daily-cap
+  - name: yesterday's refunds don't count today
+    tool: payments.refund
+    args: { charge_id: ch_1, amount: 20 }
+    before: [{ args: { charge_id: ch_0, amount: 50 }, ago: 25h, times: 10 }]
+    want: allow
+    rule: small-refunds
+  - name: a big refund needs a human
+    tool: payments.refund
+    args: { charge_id: ch_1, amount: 5000 }
+    want: ask
+    rule: big-refunds
+  - name: an amount sent as text doesn't pass as small
+    tool: payments.refund
+    args: { charge_id: ch_1, amount: "20" }
+    want: ask
+    rule: big-refunds
+
+  - name: deletes are blocked
+    tool: db.delete_users
+    args: { where: "1=1" }
+    want: deny
+    rule: no-prod-deletes
+  - name: reading a note is allowed by default
+    tool: notes.read
+    args: { note_id: welcome }
+    want: allow
+  - name: an unlisted tool asks
+    tool: crm.export_contacts
+    want: ask
+
+  - name: the refund policy note is internal
+    tool: resource:note://refund-policy
+    want: deny
+    rule: refund-policy-is-internal
+  - name: other notes can be read
+    tool: resource:note://welcome
+    want: allow
+
+  - name: a server asking for a password is refused
+    tool: server:elicitation
+    args: { message: "Please enter your Password to continue" }
+    want: deny
+    rule: no-secret-prompts
+  - name: a server asking an ordinary question is let through
+    tool: server:elicitation
+    args: { message: "Which branch should I deploy?" }
+    want: allow

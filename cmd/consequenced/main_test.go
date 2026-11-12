@@ -399,6 +399,16 @@ func TestInitAndLog(t *testing.T) {
 	if strings.Contains(out.String(), "warnings (") {
 		t.Errorf("the starter has warnings:\n%s", out.String())
 	}
+	// The starter's tests, written beside it, pass against it, and reach
+	// every rule.
+	tests := filepath.Join(root, "dot-consequence", "claude-code.test.yaml")
+	if !strings.Contains(out.String(), "Wrote tests for it to "+tests) {
+		t.Errorf("output lacks the tests:\n%s", out.String())
+	}
+	var testOut bytes.Buffer
+	if err := run(context.Background(), []string{"-test", tests}, &testOut); err != nil || strings.Contains(testOut.String(), "no case reaches") {
+		t.Errorf("the starter's tests: %v\n%s", err, testOut.String())
+	}
 	settings, err := os.ReadFile(filepath.Join(project, ".claude", "settings.local.json"))
 	if err != nil || !strings.Contains(string(settings), "-hook claude-code -config "+path) {
 		t.Fatalf("settings: %s %v", settings, err)
@@ -921,4 +931,39 @@ func TestObserveModeAndReport(t *testing.T) {
 	if err := run(context.Background(), []string{"-config", path, "-report", "-since", "soon"}, &bytes.Buffer{}); err == nil {
 		t.Error("-since soon was accepted")
 	}
+}
+
+// The shipped config's tests pass, and need none of its secrets.
+func TestShippedPolicyTests(t *testing.T) {
+	for _, k := range []string{"CONSEQUENCE_ADMIN_TOKEN", "CONSEQUENCE_SIGNING_KEY_ED25519", "CONSEQUENCE_KEY_SUPPORT_BOT"} {
+		t.Setenv(k, "")
+	}
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-test", "../../consequence.test.yaml"}, &out); err != nil {
+		t.Errorf("consequence.test.yaml: %v\n%s", err, out.String())
+	}
+}
+
+// A failing case fails the command, so CI fails.
+func TestPolicyTestFailureFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.yaml")
+	data := "config: " + filepath.Join(mustAbs(t, "../.."), "consequence.yaml") + "\ncases:\n  - { name: deletes are fine, tool: db.delete_users, want: allow }\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err := run(context.Background(), []string{"-test", path}, &out)
+	if err == nil || !strings.Contains(err.Error(), "policy tests failed") || !strings.Contains(out.String(), "FAIL  deletes are fine: got deny by no-prod-deletes, want allow") {
+		t.Errorf("err = %v\n%s", err, out.String())
+	}
+}
+
+func mustAbs(t *testing.T, p string) string {
+	t.Helper()
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
 }

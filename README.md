@@ -245,6 +245,39 @@ rules:
   action: allow                 # any other command falls through and asks
 ```
 
+### Testing a policy
+
+A policy is code, so test it like code. A test file lists calls, and the decision each should get:
+
+```yaml
+# consequence.test.yaml
+config: consequence.yaml        # the policy to test, relative to this file
+at: 2026-11-16T10:00:00+01:00   # a fixed time, so time-window rules give the same answer every run
+require_every_rule: true        # fail if some rule is reached by no case
+cases:
+  - name: a small refund goes through
+    tool: payments.refund
+    args: { charge_id: ch_1, amount: 20 }
+    want: allow
+    rule: small-refunds          # optional: the rule that should decide
+  - name: small refunds stop at 500 a day
+    tool: payments.refund
+    args: { charge_id: ch_1, amount: 20 }
+    before: [{ args: { amount: 50 }, ago: 3h, times: 10 }]   # earlier calls, for limit rules
+    want: ask
+```
+
+```bash
+consequenced -test consequence.test.yaml
+# ok    a small refund goes through: allow by small-refunds
+# FAIL  small refunds stop at 500 a day: got allow by small-refunds, want ask
+# FAIL: 1 of 2 cases
+```
+
+It exits with status 1 when a case fails, so it fits in CI. Only the policy is read, so CI needs none of the server's secrets. Arguments behave as they would in a real JSON call: `20` is a number, `"20"` is text, and a date stays the text written. A case can also set `at`, and `agent`, since limits count per agent. [consequence.test.yaml](consequence.test.yaml) tests the shipped config, and `make test-policy` runs it.
+
+For a Claude Code hook policy, put `hook: claude-code` and a `project:` directory in the file. Each case's `args` is then Claude Code's `tool_input`, and the hook's derived arguments (`compound`, `in_project`, `program`, `via_symlink`) are added as the hook adds them. For a fact that depends on the machine, such as a symlink, `set: { via_symlink: true }` gives it directly. `consequenced -init claude-code` writes such a file beside the starter policy, `claude-code.test.yaml`, with a case for every rule.
+
 ### Limits and time windows
 
 A rule can also match on how much an agent has already done, or on when the call arrives. Everything a rule sets must hold for it to match.
@@ -693,7 +726,8 @@ This is an early MVP. Built:
 - signing key rotation, with old keys kept for saved audit heads, and offline receivers that pick up new keys by themselves;
 - archiving old audit entries to a file that can be checked on its own, without breaking the chain;
 - policy checks on what the server asks of the client: elicitation, sampling and roots;
-- observe mode, which decides and audits every call but stops none, and a report of what was or would have been stopped.
+- observe mode, which decides and audits every call but stops none, and a report of what was or would have been stopped;
+- policy tests: a table of calls and the decisions they should get, run with `consequenced -test` in CI.
 
 Not yet:
 - passkey-signed approvals.

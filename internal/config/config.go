@@ -348,6 +348,26 @@ func LoadAny(path string, lookupEnv LookupEnv) (cfg *Config, local bool, err err
 	return cfg, local, nil
 }
 
+// LoadPolicy reads only the policy from a config of either kind: the
+// tools map, the rules and default_allow_below, checked as the server
+// checks them. No env var is read, so it works where the server's secrets
+// aren't, such as CI. For consequenced -test.
+func LoadPolicy(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	cfg, err := decode(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	cfg.applyDefaults()
+	if _, err := cfg.NewEngine(); err != nil {
+		return nil, fmt.Errorf("%s: policy: %w", path, err)
+	}
+	return cfg, nil
+}
+
 // ParseLocal is Parse for the local modes, such as the Claude Code hook.
 // They need the policy, a state_dir to keep the audit log and limits
 // between calls, and optionally local_agent. The HTTP server's settings,
