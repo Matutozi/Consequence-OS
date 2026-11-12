@@ -410,3 +410,65 @@ func TestParseLocal(t *testing.T) {
 		})
 	}
 }
+
+func TestUpstreamAuth(t *testing.T) {
+	withUpstream := func(u string) string {
+		return strings.Replace(validYAML, "upstream: http://localhost:9090/mcp", "upstream: "+u, 1) + "upstream_auth_env: UP_TOKEN\n"
+	}
+	if !strings.Contains(validYAML, "upstream: http://localhost:9090/mcp") {
+		t.Fatal("validYAML's upstream changed; update this test")
+	}
+	tests := []struct {
+		name, upstream, token, wantErr string
+	}{
+		{"https", "https://api.githubcopilot.com/mcp/", "ghp_abc", ""},
+		{"localhost", "http://localhost:9090/mcp", "t", ""},
+		{"loopback", "http://127.0.0.1:9090/mcp", "t", ""},
+		{"loopback v6", "http://[::1]:9090/mcp", "t", ""},
+		{"plain http elsewhere", "http://tools.internal:9090/mcp", "t", "is plain http"},
+		{"looks local but isn't", "http://localhost.evil.example/mcp", "t", "is plain http"},
+		{"not set", "https://x.example/mcp", "", "UP_TOKEN (upstream_auth_env) is not set"},
+		{"a line break", "https://x.example/mcp", "t\r\nX-Evil: 1", "space or control character"},
+		{"a space", "https://x.example/mcp", "Bearer t", "space or control character"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := map[string]string{"KEY_SUPPORT": "k"}
+			if tt.token != "" {
+				env["UP_TOKEN"] = tt.token
+			}
+			cfg, err := Parse([]byte(withUpstream(tt.upstream)), baseEnv(env))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				if strings.Contains(err.Error(), "X-Evil") {
+					t.Error("the error repeats the token")
+				}
+				return
+			}
+			if err != nil || cfg.UpstreamAuth != tt.token {
+				t.Errorf("UpstreamAuth = %q, err %v", cfg.UpstreamAuth, err)
+			}
+		})
+	}
+}
+
+func TestNoReceiptWarningForAHostedUpstream(t *testing.T) {
+	yml := strings.Replace(validYAML, "upstream: http://localhost:9090/mcp", "upstream: https://api.githubcopilot.com/mcp/", 1) + "upstream_auth_env: UP_TOKEN\n"
+	cfg, err := Parse([]byte(yml), baseEnv(map[string]string{"KEY_SUPPORT": "k", "UP_TOKEN": "ghp_x"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := cfg.Warnings(); len(w) != 0 {
+		t.Errorf("warnings for a hosted upstream: %q", w)
+	}
+	// With receivers listed, ConsequenceOS's receipts do matter again.
+	cfg, err = Parse([]byte(yml+"receivers: [{ id: tools, api_key_env: RECV }]\n"), baseEnv(map[string]string{"KEY_SUPPORT": "k", "UP_TOKEN": "ghp_x", "RECV": "r"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Warnings()) != 1 {
+		t.Errorf("want the upstream_receiver warning back with receivers listed: %q", cfg.Warnings())
+	}
+}

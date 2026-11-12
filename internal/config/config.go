@@ -49,9 +49,17 @@ type Config struct {
 	// UpstreamReceiver is the ID of the receiver behind upstream. Receipts
 	// then name it (receipt v1), so no other receiver accepts them. Left
 	// empty, receipts are v0 and any receiver with the tool accepts them.
-	UpstreamReceiver string        `yaml:"upstream_receiver"`
-	Tools            policy.Levels `yaml:"tools"`
-	Rules            []policy.Rule `yaml:"rules"`
+	UpstreamReceiver string `yaml:"upstream_receiver"`
+
+	// UpstreamAuthEnv names the env var holding a token for the upstream,
+	// such as a hosted MCP server's. ConsequenceOS sends it as
+	// "Authorization: Bearer <token>" in place of the agent's own key, so
+	// the agent never holds it. It never appears in a log or the audit log.
+	UpstreamAuthEnv string `yaml:"upstream_auth_env"`
+	UpstreamAuth    string `yaml:"-"`
+
+	Tools policy.Levels `yaml:"tools"`
+	Rules []policy.Rule `yaml:"rules"`
 	// DefaultAllowBelow is the consequence score under which a call no rule
 	// matches is allowed. A pointer, so an explicit 0 (allow nothing by
 	// default) differs from leaving it out (policy.DefaultAllowBelow).
@@ -340,6 +348,19 @@ func (c *Config) resolveSecrets(lookupEnv LookupEnv) error {
 		}
 		c.Email.SMTPURL = value
 	}
+	if c.UpstreamAuthEnv != "" {
+		value, ok := lookupEnv(c.UpstreamAuthEnv)
+		if !ok || value == "" {
+			return fmt.Errorf("env var %s (upstream_auth_env) is not set", c.UpstreamAuthEnv)
+		}
+		for _, r := range value {
+			// A line break would let the token add headers of its own.
+			if r <= ' ' || r == 0x7f {
+				return fmt.Errorf("env var %s (upstream_auth_env) holds a space or control character; a token can't", c.UpstreamAuthEnv)
+			}
+		}
+		c.UpstreamAuth = value
+	}
 	if c.DatabaseURLEnv != "" {
 		value, ok := lookupEnv(c.DatabaseURLEnv)
 		if !ok || value == "" {
@@ -383,6 +404,9 @@ func (c *Config) validate() error {
 	}
 	if err := validateUpstream(c.Upstream); err != nil {
 		return err
+	}
+	if c.UpstreamAuth != "" && !private(c.Upstream) {
+		return fmt.Errorf("upstream %q is plain http, so upstream_auth_env's token would cross the network unencrypted; use https, or a localhost upstream", c.Upstream)
 	}
 	if c.ApprovalValidity < 0 {
 		return errors.New("approval_validity must be positive")
@@ -443,6 +467,24 @@ func validateUpstream(raw string) error {
 		return fmt.Errorf("upstream %q must be an http(s) URL", raw)
 	}
 	return nil
+}
+
+// private reports whether a token sent to the upstream stays private on
+// the way: the URL is https, or http to this machine.
+func private(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Scheme == "https" {
+		return true
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func validateOrigins(origins []string) error {
@@ -554,7 +596,11 @@ func (c *Config) validateKeys() error {
 // be. consequenced -check prints them and the server logs them at startup.
 func (c *Config) Warnings() []string {
 	var w []string
-	if c.UpstreamReceiver == "" {
+	// A hosted upstream, reached with upstream_auth_env's token and with no
+	// receivers listed, checks no receipts: the token is what keeps the
+	// agent from going around ConsequenceOS. Receipt versions don't matter.
+	hosted := c.UpstreamAuthEnv != "" && len(c.Receivers) == 0
+	if c.UpstreamReceiver == "" && !hosted {
 		w = append(w, "upstream_receiver is not set, so receipts are v0 and don't name their receiver: "+
 			"any receiver with the same tool would accept them. Set it to the upstream's receiver ID.")
 	}
