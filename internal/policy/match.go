@@ -46,6 +46,9 @@ func (c Condition) validate() error {
 	if c.Arg == "" {
 		return fmt.Errorf("condition: arg is required")
 	}
+	if err := validPath(c.Arg); err != nil {
+		return fmt.Errorf("condition on %q: the path %w", c.Arg, err)
+	}
 	switch c.Op {
 	case OpEq, OpNe:
 		if !isScalar(c.Value) {
@@ -144,41 +147,20 @@ func validateList(v any) error {
 	return nil
 }
 
-// matches reports whether the condition holds for args, by the argument's
-// exact name. A missing argument or one of the wrong type never matches, so
-// evaluation falls through to later rules.
-func (c Condition) matches(args map[string]any) bool {
-	got, ok := args[c.Arg]
-	return ok && c.matchValue(got)
-}
-
-// matchesLoosely is matches, but an argument whose name differs only in
-// letter case counts too: "Environment" for a condition on "environment".
-// Many tool servers read names that way (Go's JSON decoding does, for one),
-// so a deny rule that missed "Environment" would let the server act on it.
-// Deny and ask rules match loosely; allow rules don't, so a variant falls
-// through and asks. Either way a variant can only make the policy stricter.
-func (c Condition) matchesLoosely(args map[string]any) bool {
-	for _, v := range values(args, c.Arg) {
-		if c.matchValue(v) {
-			return true
-		}
-	}
-	return false
-}
-
-// values returns the argument called name, and any whose name differs only
-// in letter case. The proxy refuses requests with two such names, so there
-// is at most one there; a dry run with -tool might pass several.
-func values(args map[string]any, name string) []any {
-	var out []any
-	for k, v := range args {
-		if k == name || strings.EqualFold(k, name) {
-			out = append(out, v)
-		}
-	}
-	return out
-}
+// matches reports whether the condition holds for args as an allow rule
+// judges it: by exact names, and every value the path finds. A missing
+// argument or one of the wrong type never matches, so evaluation falls
+// through to later rules.
+//
+// Deny and ask rules use Condition.holds with loose set: an argument whose
+// name differs only in letter case counts too ("Environment" for
+// "environment"). Many tool servers read names that way (Go's JSON
+// decoding does, for one), so a deny rule that missed "Environment" would
+// let the server act on it. An allow rule doesn't, so a variant falls
+// through and asks. Either way a variant can only make the policy
+// stricter. The proxy refuses requests with two such names, so there is at
+// most one there; a dry run with -tool might pass several.
+func (c Condition) matches(args map[string]any) bool { return c.holds(args, false) }
 
 // matchValue compares one argument value with the condition.
 func (c Condition) matchValue(got any) bool {

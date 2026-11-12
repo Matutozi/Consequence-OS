@@ -21,7 +21,7 @@ import (
 type Limit struct {
 	Max float64       `yaml:"max"`
 	Per time.Duration `yaml:"per"`
-	Sum string        `yaml:"sum,omitempty"` // argument to total; empty counts calls
+	Sum string        `yaml:"sum,omitempty"` // argument (or path, like items.*.amount) to total; empty counts calls
 }
 
 func (l *Limit) validate() error {
@@ -30,6 +30,9 @@ func (l *Limit) validate() error {
 	}
 	if l.Max <= 0 {
 		return errors.New("limit.max must be positive")
+	}
+	if err := validPath(l.Sum); err != nil {
+		return fmt.Errorf("limit.sum %q: the path %w", l.Sum, err)
 	}
 	if l.Sum == "" && l.Max != math.Trunc(l.Max) {
 		return errors.New("limit.max must be a whole number when counting calls")
@@ -72,17 +75,11 @@ func (l *Limit) exceeded(ctx context.Context, scope string, c Call, usage UsageC
 	}
 	var amount float64
 	if l.Sum != "" {
-		v, ok := toNumber(c.Args[l.Sum])
-		if loose {
-			if lowest, found := smallestNumber(c.Args, l.Sum); found && lowest < 0 {
-				return true, nil // any negative amount needs a human, as below
-			}
-			v, ok = largestNumber(c.Args, l.Sum)
-		}
+		v, negative, ok := limitAmount(c.Args, l.Sum, loose)
 		if !ok {
 			return false, nil // like a condition: a missing or non-numeric argument doesn't match
 		}
-		if v < 0 {
+		if negative {
 			// Adding a negative amount would lower the total and make room
 			// for later calls. Whatever it means to the tool, a human should see it.
 			return true, nil
@@ -97,27 +94,6 @@ func (l *Limit) exceeded(ctx context.Context, scope string, c Call, usage UsageC
 		return float64(count+1) > l.Max, nil
 	}
 	return sum+amount > l.Max, nil
-}
-
-// largestNumber returns the largest numeric value among the arguments
-// called name in any letter case, or ok=false when there is none.
-func largestNumber(args map[string]any, name string) (n float64, ok bool) {
-	for _, v := range values(args, name) {
-		if f, isNum := toNumber(v); isNum && (!ok || f > n) {
-			n, ok = f, true
-		}
-	}
-	return n, ok
-}
-
-// smallestNumber is largestNumber's opposite.
-func smallestNumber(args map[string]any, name string) (n float64, ok bool) {
-	for _, v := range values(args, name) {
-		if f, isNum := toNumber(v); isNum && (!ok || f < n) {
-			n, ok = f, true
-		}
-	}
-	return n, ok
 }
 
 func (l *Limit) String() string {

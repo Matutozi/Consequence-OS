@@ -111,3 +111,28 @@ func TestDenyRuleCatchesArgumentNamesInAnotherCase(t *testing.T) {
 		t.Errorf("a delete with Environment=production got through: %s", body)
 	}
 }
+
+func TestDenyRuleCatchesNestedArguments(t *testing.T) {
+	rules := []policy.Rule{
+		{Name: "no-prod-deletes", Tool: "db.delete_rows", When: policy.Conditions{{Arg: "options.environment", Op: policy.OpEq, Value: "production", Fold: true}}, Action: policy.ActionDeny},
+		{Name: "deletes-otherwise-go", Tool: "db.delete_rows", Action: policy.ActionAllow},
+	}
+	f := newFixtureWithRules(t, nil, rules)
+	for _, args := range []string{
+		`{"table":"users","options":{"environment":"production"}}`,
+		`{"table":"users","options":{"Environment":"Production"}}`,
+	} {
+		body := f.do(http.MethodPost, call("db.delete_rows", args), nil).Body.String()
+		if !strings.Contains(body, "no-prod-deletes") {
+			t.Errorf("%s got through: %s", args, body)
+		}
+	}
+	// Two nested names differing only in case are refused before the policy runs.
+	rec := f.do(http.MethodPost, call("db.delete_rows", `{"options":{"environment":"staging","Environment":"production"}}`), nil)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "differ only in letter case") {
+		t.Errorf("nested case variants: %d %s", rec.Code, rec.Body)
+	}
+	if f.up.count() != 0 {
+		t.Errorf("%d calls reached the upstream", f.up.count())
+	}
+}

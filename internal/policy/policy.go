@@ -259,8 +259,9 @@ func (e *Engine) UsageRecords(c Call) []UsageRecord {
 				continue
 			}
 			// Counted by any letter case of the name, and the largest if
-			// there are several: over-counting is the safe way round.
-			if v, ok := largestNumber(c.Args, r.Limit.Sum); ok {
+			// there are several: over-counting is the safe way round. A
+			// path with * counts every item.
+			if v, _, ok := limitAmount(c.Args, r.Limit.Sum, true); ok {
 				if u.Values == nil {
 					u.Values = map[string]float64{}
 				}
