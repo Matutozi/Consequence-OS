@@ -75,7 +75,7 @@ type stdioFixture struct {
 	engine    *policy.Engine
 }
 
-func newStdioFixture(t *testing.T) *stdioFixture {
+func newStdioFixture(t *testing.T, edits ...func(*StdioOptions)) *stdioFixture {
 	t.Helper()
 	engine, err := policy.NewEngine([]policy.Rule{
 		{Name: "small-refunds", Tool: "payments.refund", When: policy.Conditions{{Arg: "amount", Op: policy.OpLte, Value: 50}}, Action: policy.ActionAllow},
@@ -112,7 +112,11 @@ func newStdioFixture(t *testing.T) *stdioFixture {
 		Stderr: io.Discard, AgentID: "local", OwnerID: "local",
 		Open:           f.open,
 		ApproveCommand: func(id string) string { return "consequenced -approve " + id },
+		LocalUser:      "local:ada",
 		Log:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	for _, edit := range edits {
+		edit(&opts)
 	}
 	go func() {
 		err := RunStdio(context.Background(), clientIn, clientOut, opts)

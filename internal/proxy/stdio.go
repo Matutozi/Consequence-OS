@@ -46,7 +46,14 @@ type StdioOptions struct {
 	Open func(ctx context.Context) (*gate.Gate, *approval.Service, func(), error)
 	// ApproveCommand is the command a person runs to approve a held call.
 	ApproveCommand func(approvalID string) string
-	Log            *slog.Logger
+	// AskInClient asks the person through the MCP client about held calls,
+	// when the client can show forms; see stdio_ask.go. It trusts the
+	// client to show the question to a person, so it's off by default.
+	AskInClient bool
+	// LocalUser names the person in decisions made in the client, e.g.
+	// "local:ada".
+	LocalUser string
+	Log       *slog.Logger
 }
 
 // ErrServerExited means the MCP server stopped before the client did.
@@ -78,7 +85,7 @@ func RunStdio(ctx context.Context, in io.Reader, out io.Writer, opts StdioOption
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("stdio: start %s: %w", opts.Command[0], err)
 	}
-	s := &stdio{opts: opts, client: &lineWriter{w: out}, server: toServer, waiting: map[string]bool{}}
+	s := &stdio{opts: opts, client: &lineWriter{w: out}, server: toServer, waiting: map[string]bool{}, askKey: newAskKey()}
 
 	serverDone := make(chan struct{})
 	go func() {
@@ -114,6 +121,7 @@ type stdio struct {
 	opts   StdioOptions
 	client *lineWriter
 	server io.Writer // only relayFromClient writes to it
+	askKey []byte    // signs the requestState of questions asked in the client
 
 	mu      sync.Mutex
 	waiting map[string]bool // IDs of requests sent to the server and not yet answered
@@ -276,6 +284,11 @@ func (s *stdio) handleCall(ctx context.Context, msg message, line []byte) error 
 		return nil
 	}
 
+	// A retry that answers our question decides its approval first, so
+	// the gate then finds it decided.
+	dismissedIt := s.applyAnswer(ctx, approvals, msg, call)
+	ours := s.carriesOurState(msg)
+
 	res, err := g.Decide(ctx, gate.Request{AgentID: s.opts.AgentID, OwnerID: s.opts.OwnerID, Name: call.name, RawArgs: call.rawArgs, Args: call.args})
 	if err != nil {
 		var gerr *gate.Error
@@ -294,6 +307,9 @@ func (s *stdio) handleCall(ctx context.Context, msg message, line []byte) error 
 	switch res.Verdict {
 	case gate.Allowed:
 		forwardLine, err := stripReceipt(line)
+		if err == nil {
+			forwardLine, err = withoutOurInput(forwardLine, ours)
+		}
 		if err != nil {
 			s.client.writeJSON(errorResponse(msg.id, codeInvalidParams, "params._meta must be an object"))
 			return nil
@@ -313,6 +329,9 @@ func (s *stdio) handleCall(ctx context.Context, msg message, line []byte) error 
 	case gate.Declined:
 		s.client.writeJSON(refusal(msg, call, fmt.Sprintf("Rejected: the user declined %s (approval %s). Do not retry it; tell the user it was declined.", call.what(), res.Approval.ID)))
 	default: // gate.Held
+		if !dismissedIt && s.askInClient(msg, call, res) {
+			return nil
+		}
 		a := res.Approval
 		text := fmt.Sprintf("Approval pending: %s needs the user to approve it (policy rule %q). Approval ID: %s. "+
 			"Tell the user this action is waiting for them, and that they approve it by running `%s` in a terminal. "+
