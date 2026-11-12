@@ -18,7 +18,8 @@ const (
 	headerName            = "Mcp-Name"
 	headerReceipt         = "X-Consequence-Receipt"
 
-	metaProtocolVersion = "io.modelcontextprotocol/protocolVersion"
+	metaProtocolVersion    = "io.modelcontextprotocol/protocolVersion"
+	metaClientCapabilities = "io.modelcontextprotocol/clientCapabilities"
 
 	methodToolsCall     = "tools/call"
 	methodResourcesRead = "resources/read"

@@ -301,6 +301,8 @@ func runStdio(ctx context.Context, cfg *config.Config, command []string, approve
 		AgentID: cfg.LocalAgent.ID, OwnerID: cfg.LocalAgent.OwnerID,
 		Open:           localGate(cfg, engine, log),
 		ApproveCommand: approveCmd,
+		AskInClient:    cfg.StdioAskInClient,
+		LocalUser:      localUser(),
 		Log:            log,
 	})
 }

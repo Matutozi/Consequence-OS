@@ -110,6 +110,12 @@ type Config struct {
 	// token. It must be absolute or start with ~/, and readable by its
 	// owner alone.
 	StdioEnvFile string `yaml:"stdio_env_file"`
+	// StdioAskInClient asks the person about held calls through the MCP
+	// client, when it can show forms, instead of only naming the
+	// consequenced -approve command. Only for clients that show such
+	// questions to a person: some agent frameworks let the model answer
+	// them, and the agent would then approve its own calls.
+	StdioAskInClient bool `yaml:"stdio_ask_in_client"`
 }
 
 // LocalAgent is the agent and owner the local modes record calls under.
