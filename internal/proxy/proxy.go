@@ -45,8 +45,12 @@ type Options struct {
 	// Receiver is the upstream's receiver ID. Set, every receipt is v1 and
 	// names it, with the call's consequence; empty, receipts are v0.
 	Receiver string
-	Log      *slog.Logger
-	Now      func() time.Time // nil means time.Now; tests pass a fixed clock
+	// UpstreamAuth is a token for the upstream, sent as "Authorization:
+	// Bearer <token>" in place of the agent's key. It is scrubbed from every
+	// response, and never logged.
+	UpstreamAuth string
+	Log          *slog.Logger
+	Now          func() time.Time // nil means time.Now; tests pass a fixed clock
 }
 
 // Proxy implements http.Handler for the /mcp endpoint. It is the HTTP
@@ -97,7 +101,7 @@ func New(opts Options) (*Proxy, error) {
 	for _, o := range opts.AllowedOrigins {
 		p.origins[strings.TrimSuffix(o, "/")] = true
 	}
-	p.rp = newReverseProxy(upstream, p.log)
+	p.rp = newReverseProxy(upstream, opts.UpstreamAuth, p.log)
 	return p, nil
 }
 
@@ -292,8 +296,17 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, body []byte) {
 }
 
 // newReverseProxy uses the standard library's reverse proxy, which already
-// handles hop-by-hop headers and streaming responses such as SSE.
-func newReverseProxy(upstream *url.URL, log *slog.Logger) *httputil.ReverseProxy {
+// handles hop-by-hop headers and streaming responses such as SSE. token,
+// when set, is the upstream's credential; see redact.go.
+func newReverseProxy(upstream *url.URL, token string, log *slog.Logger) *httputil.ReverseProxy {
+	var modify func(*http.Response) error
+	if token != "" {
+		modify = func(resp *http.Response) error {
+			redactHeaders(resp.Header, token)
+			resp.Body = newRedactor(resp.Body, token)
+			return nil
+		}
+	}
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			// Point at the upstream's own path. (SetURL would append ours to it.)
@@ -304,6 +317,13 @@ func newReverseProxy(upstream *url.URL, log *slog.Logger) *httputil.ReverseProxy
 			pr.Out.Host = upstream.Host
 			// The agent's key is for us, not for the tool server.
 			pr.Out.Header.Del("Authorization")
+			if token != "" {
+				pr.Out.Header.Set("Authorization", "Bearer "+token)
+				// Without the agent's Accept-Encoding, Go's transport asks
+				// for gzip itself and decompresses the reply, so the token
+				// can be scrubbed from it.
+				pr.Out.Header.Del("Accept-Encoding")
+			}
 			// Only ConsequenceOS attaches receipts: drop any the agent sent,
 			// then add ours if this call has one.
 			pr.Out.Header.Del(headerReceipt)
@@ -312,7 +332,8 @@ func newReverseProxy(upstream *url.URL, log *slog.Logger) *httputil.ReverseProxy
 			}
 			pr.SetXForwarded()
 		},
-		FlushInterval: -1, // flush every write, so SSE events arrive immediately
+		ModifyResponse: modify,
+		FlushInterval:  -1, // flush every write, so SSE events arrive immediately
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if errors.Is(err, context.Canceled) {
 				return // the agent hung up; nobody to answer

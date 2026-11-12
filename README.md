@@ -432,6 +432,7 @@ One YAML file names everything, and secrets live in environment variables that t
 | `agents` | `id`, `owner_id` and `api_key_env` for each agent |
 | `receivers` | `id` and `api_key_env` for each receiver allowed to call the verify endpoint |
 | `upstream_receiver` | The ID of the receiver behind `upstream`. Receipts name it (v1), so no other receiver accepts them. When `receivers` are listed it must be one of them. Unset, receipts are v0 |
+| `upstream_auth_env` | Env var holding a token for the upstream, sent as `Authorization: Bearer …` in place of the agent's key. The upstream must be `https`, or `http` to localhost. See [Hosted MCP servers](#hosted-mcp-servers) |
 | `owners` | `id` and `approvers` (email addresses) for each owner |
 | `receipts` | `ttl` (default `5m`), `ed25519_key_env`, `mldsa87_key_env` |
 | `database_url_env` | Env var holding a Postgres URL |
@@ -462,6 +463,24 @@ Every write waits for the disk, so this suits one person or a small team. Use Po
 What it doesn't cover:
 - **Entries from before the chain.** Those written before upgrading to a version with the chain have no hashes. Verification counts them as `unhashed` but can't check them.
 - **Rewrites after the last saved head.** The chain's hashes need no key, so someone with database access could rebuild everything after your newest saved head. Everything before it is safe while the head is kept somewhere they can't reach. Save heads often. Forging a head itself needs the signing keys.
+
+### Hosted MCP servers
+
+A hosted MCP server, such as GitHub's, needs a token, and it won't check ConsequenceOS receipts. Give the token to ConsequenceOS instead of the agent:
+
+```yaml
+upstream: https://api.githubcopilot.com/mcp/
+upstream_auth_env: GITHUB_TOKEN      # the env var holding it; the agent never sees it
+```
+
+- **How it's sent.** The proxy removes the agent's own key, as always, and sends `Authorization: Bearer <token>` upstream, on every request, event streams included.
+- **The guarantee.** Calls are allowed, denied and held exactly as before. Since ConsequenceOS holds the only token, an agent that skipped the proxy would have nothing to call the server with. That is the guarantee here, and receipts don't add to it. So `-check` doesn't ask for `upstream_receiver` when a token is set and no receivers are listed.
+- **Keeping it secret.**
+  - The token never appears in a log line or the audit log.
+  - Every response from the upstream, headers and body, has the token replaced with asterisks, in case the server echoes it back. The proxy asks the upstream for uncompressed or gzip replies it can read, so a compressed body can't hide it.
+  - A token holding a space or control character is refused, so it can't add headers.
+  - The upstream must be `https`, or `http` to localhost, so the token never crosses a network unencrypted.
+- **What it can't stop.** The server could encode the token before echoing it, base64 say, and get past the scrubbing. And the agent must not be able to read the token some other way: from your shell's environment, a file, or a command it runs. For coding agents, see [Guarding Claude Code](docs/claude-code.md).
 
 ## Running without Docker
 

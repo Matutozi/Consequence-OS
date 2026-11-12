@@ -326,6 +326,7 @@ func serve(ctx context.Context, cfg *config.Config, engine *policy.Engine) error
 		Approvals:      approvals,
 		Receipts:       receipt.NewIssuer(keys, cfg.PublicURL, cfg.Receipts.TTL, nil),
 		Receiver:       cfg.UpstreamReceiver,
+		UpstreamAuth:   cfg.UpstreamAuth,
 		Log:            log,
 	})
 	if err != nil {
@@ -592,6 +593,9 @@ func printSummary(out io.Writer, cfg *config.Config) {
 		email = "from " + cfg.Email.From + ", SMTP URL from $" + cfg.Email.SMTPURLEnv
 	}
 	fmt.Fprintf(out, "  approval email:    %s\n", email)
+	if cfg.UpstreamAuthEnv != "" {
+		fmt.Fprintf(out, "  upstream token:    from $%s, sent in place of the agent's key\n", cfg.UpstreamAuthEnv)
+	}
 	fmt.Fprintf(out, "  owners (%d):\n", len(cfg.Owners))
 	for _, o := range cfg.Owners {
 		fmt.Fprintf(out, "    - %s, approvers: %s\n", o.ID, strings.Join(o.Approvers, ", "))

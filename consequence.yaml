@@ -21,6 +21,11 @@ receipts:
   ed25519_key_env: CONSEQUENCE_SIGNING_KEY_ED25519
   mldsa87_key_env: CONSEQUENCE_SIGNING_KEY_MLDSA87
 
+# For a hosted MCP server that needs a token (GitHub's, say), name the env
+# var holding it. ConsequenceOS sends it upstream in place of the agent's
+# key, so the agent never sees it. The upstream must be https.
+# upstream_auth_env: GITHUB_TOKEN
+
 # Uncomment one of these to keep approvals, receipts, limits and the audit
 # log across restarts: in Postgres, or in files on this machine. With
 # neither, everything lives in memory and is lost on restart.
