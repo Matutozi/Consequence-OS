@@ -91,7 +91,7 @@ func RunStdio(ctx context.Context, in io.Reader, out io.Writer, opts StdioOption
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("stdio: start %s: %w", opts.Command[0], err)
 	}
-	s := &stdio{opts: opts, client: &lineWriter{w: out}, server: toServer, waiting: map[string]string{}, listings: map[string]json.RawMessage{}, askKey: newAskKey()}
+	s := &stdio{opts: opts, client: &lineWriter{w: out}, server: toServer, waiting: map[string]string{}, listings: map[string]json.RawMessage{}, pinWaits: map[string]chan []byte{}, askKey: newAskKey()}
 
 	serverDone := make(chan struct{})
 	go func() {
@@ -135,6 +135,11 @@ type stdio struct {
 	// listings holds the tools/list requests not yet answered: each ID in
 	// canonical form (listingID), and as the client sent it.
 	listings map[string]json.RawMessage
+	// pinWaits holds the wrapper's own tools/list requests, by ID, each
+	// with where its answer goes; see stdio_pin.go.
+	pinWaits map[string]chan []byte
+	pinSeq   int
+	listMu   sync.Mutex // one listing of our own at a time
 }
 
 // lineWriter writes whole lines, one writer at a time: our answers and the
@@ -168,6 +173,9 @@ func (s *stdio) relayFromServer(r io.Reader) {
 		line, err := br.ReadBytes('\n')
 		if len(bytes.TrimSpace(line)) > 0 && s.unreadableWhileListing(line) {
 			line = nil // dropped; every listing waiting was answered with an error
+		}
+		if id, ok := responseID(line); ok && s.pinAnswer(id, bytes.TrimSpace(line)) {
+			line = nil // the answer to our own listing: the client never asked
 		}
 		if len(bytes.TrimSpace(line)) > 0 {
 			method := ""
@@ -357,6 +365,14 @@ func (s *stdio) openGate(ctx context.Context) (*gate.Gate, func(), error) {
 // handleCall runs one gated call past the gate, as the HTTP proxy does.
 func (s *stdio) handleCall(ctx context.Context, msg message, line []byte) error {
 	call, rerr := parseCall(msg)
+	if rerr == nil {
+		// Before the gate opens: listing takes the state_dir itself.
+		if err := s.pinListed(ctx, call.name, msg.params["_meta"]); err != nil {
+			s.opts.Log.Error("stdio: tool list not read", "tool", call.name, "err", err)
+			s.client.writeJSON(errorResponse(msg.id, codeInternalError, errListUnavailable.Error()))
+			return nil
+		}
+	}
 	g, approvals, closeGate, err := s.opts.Open(ctx)
 	if err != nil {
 		s.opts.Log.Error("stdio: the state_dir can't be opened", "err", err)

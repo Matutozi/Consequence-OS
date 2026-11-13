@@ -51,9 +51,16 @@ func TestUnnamedArgumentsAreRefused(t *testing.T) {
 	if res := f.decide(t, request("payments.refund", `{"amount":10,"charge_id":"ch_1"}`)); res.Verdict != Allowed {
 		t.Errorf("named arguments: verdict %v", res.Verdict)
 	}
-	// A tool never listed isn't checked: nothing is known of its schema.
-	if res := f.decide(t, request("db.delete_rows", `{"anything":1}`)); res.Verdict != Denied {
-		t.Errorf("unlisted tool: verdict %v, want the policy's deny", res.Verdict)
+	// A tool the server doesn't list is refused: nothing is known of its
+	// arguments. Adapters list the upstream before deciding a call to a
+	// tool not yet pinned, so this is a tool the server doesn't have.
+	res = f.decide(t, request("db.delete_rows", `{"anything":1}`))
+	if res.Verdict != Invalid || res.Reason != "db.delete_rows isn't in the server's tool list, so its arguments can't be checked against the tool's definition" {
+		t.Errorf("unlisted tool: verdict %v, reason %q", res.Verdict, res.Reason)
+	}
+	// The server's requests of the client are never listed, and go to the policy.
+	if res := f.decide(t, request("server:elicitation", `{"message":"Which language?"}`)); res.Verdict == Invalid {
+		t.Errorf("a server request was refused as unlisted: %q", res.Reason)
 	}
 }
 

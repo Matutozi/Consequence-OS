@@ -15,6 +15,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matutozi/consequence-os/internal/approval"
@@ -78,8 +79,10 @@ type Proxy struct {
 	// upstreamToken is the upstream's credential, scrubbed from answers;
 	// see redact.go.
 	upstreamToken string
-	client        *http.Client // answers the server's refused requests; see response.go
+	client        *http.Client // answers the server's refused requests, and lists tools; see response.go, pinlist.go
 	rp            *httputil.ReverseProxy
+	upstream      *url.URL
+	listMu        sync.Mutex // one listing of the upstream's tools at a time; see pinlist.go
 }
 
 // New builds a Proxy.
@@ -111,6 +114,7 @@ func New(opts Options) (*Proxy, error) {
 
 		upstreamToken: opts.UpstreamAuth,
 		client:        &http.Client{Timeout: 10 * time.Second},
+		upstream:      upstream,
 	}
 	for _, a := range opts.Agents {
 		// Looking agents up by a hash of the key means we never compare raw
@@ -189,6 +193,14 @@ func (p *Proxy) handleCall(w http.ResponseWriter, r *http.Request, agent config.
 		return
 	}
 
+	if err := p.pinListed(r.Context(), call.name, toolpin.Lister{AgentID: agent.ID, OwnerID: agent.OwnerID}, listAs{meta: msg.params["_meta"], header: r.Header}); err != nil {
+		p.log.Error("tool list not read", "tool", call.name, "err", err)
+		_ = p.gate.Record(r.Context(), audit.Entry{ // best effort: nothing is forwarded either way
+			AgentID: agent.ID, OwnerID: agent.OwnerID, Tool: call.name, Outcome: audit.OutcomeRejected, Detail: errListUnavailable.Error(),
+		})
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse(msg.id, codeInternalError, errListUnavailable.Error()))
+		return
+	}
 	res, err := p.gate.Decide(r.Context(), gate.Request{
 		AgentID: agent.ID, OwnerID: agent.OwnerID, Name: call.name, RawArgs: call.rawArgs, Args: call.args,
 	})

@@ -372,6 +372,7 @@ Levels, rules and approvals go by tool name. So a server could change what `note
 - **Arguments the schema doesn't name** are refused, before the policy sees the call. For example, a `refund_all` the schema never mentioned, or `Environment` beside the schema's `environment`. At each level the schema describes as an object, every key must be one of its `properties`, unless that level sets `additionalProperties`. `{"type": "object"}` with no properties, MCP's form for a tool without arguments, takes none. The refusal is a tool error result, which says which argument it was, so the agent can retry without it. A level that combines schemas (`$ref`, `anyOf`, `oneOf` and the like) isn't checked. For a server whose schemas leave out arguments it really takes, set `tool_pins: { unnamed_arguments: allow }`.
 - **Rules that never match:** `-tools` also warns about rules on an argument that no tool they cover has in its schema, and suggests the path it may have meant: `rule "no-prod-deletes": db.delete_rows has no argument environment in its schema, so the rule never matches it; did you mean options.environment?`
 - **Fails closed:** if the pins can't be read or saved, the listing isn't passed on, and the call isn't forwarded. The same goes for a listing that can't be read the same way by every parser: duplicate keys, invalid UTF-8, or the `NaN` that some parsers accept. And it goes for a listing compressed when it wasn't asked to be.
+- **Calls before any listing:** every MCP client lists a server's tools before calling them, but a hostile agent needn't. So a call to a tool that isn't pinned yet makes ConsequenceOS list the server's tools itself first, the same way the agent would have: with the agent's protocol version and session, and with the upstream's token when there is one. The listing goes no further than the pins. Then the call is checked as usual. A tool that still isn't pinned is one the server doesn't list, and its calls are refused. If the server's tool list can't be read, the call isn't forwarded. A burst of first calls lists once.
 - **Audited:** each first pin (`tool_pinned`), change (`tool_changed`) and acceptance (`tool_accepted`) is in the audit log, with the hashes.
 
 `make demo-rug-pull` shows it on a local server that changes `notes.read` under the same command line.
@@ -381,7 +382,7 @@ Pins live in the store, so they last with `state_dir` or Postgres. With the in-m
 What it doesn't cover:
 - **A server that lies.** Pinning catches a changed listing, not a server that lists one thing and does another. Receipts and the policy still apply to every call.
 - **New tools.** A tool listed for the first time is pinned as it is. Unlisted in `tools`, it counts as irreversible, so it asks unless a rule allows it.
-- **Calls made before the listing.** A change is known once the server lists it.
+- **A change between listings.** A change is known once the server lists it again: when an agent lists, or when a call names a tool not yet pinned.
 - **Prompts and resources.** Their listings aren't pinned yet.
 
 ### Requests from the server
