@@ -41,8 +41,13 @@ type Options struct {
 	Approvals *approval.Service
 	// Tools checks calls against the upstream's pinned tool definitions:
 	// arguments the accepted schema doesn't name are refused, and a tool
-	// whose definition changed asks. nil means nothing is pinned, as for
-	// the Claude Code hook, whose tools come from no listing.
+	// whose definition changed asks. A call to a tool with no pin is
+	// refused too: nothing is known of its arguments. So an adapter with
+	// Tools set fetches the upstream's listing before deciding a call to
+	// a tool not yet pinned (see PinListed in the proxy), and what is still
+	// unpinned after that is a tool the server doesn't list. nil means
+	// nothing is pinned, as for the Claude Code hook, whose tools come
+	// from no listing.
 	Tools *toolpin.Service
 	// Observe is observe mode (shadow mode): calls are decided and
 	// audited as usual, but none is stopped. A call the policy would have
@@ -193,6 +198,11 @@ func (g *Gate) Decide(ctx context.Context, req Request) (*Result, error) {
 		if err != nil {
 			g.log.Error("tool pin lookup failed", "tool", req.Name, "err", err)
 			return nil, &Error{What: "tool definitions unavailable", Err: err}
+		}
+		// (Reads, and the server's requests of the client, aren't tools,
+		// are never listed, and don't get here.)
+		if st == toolpin.Unpinned {
+			problem = fmt.Sprintf("%s isn't in the server's tool list, so its arguments can't be checked against the tool's definition", req.Name)
 		}
 		if problem != "" && !g.observe {
 			entry.Tool, entry.ParamsHash, entry.Summary = req.Name, hash, Summarize(req.Name, req.Args)

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +33,11 @@ type toolServer struct {
 	gzip     bool   // gzip listings when the request accepts it
 	calls    []string
 	accepted []string // Accept-Encoding of each listing request
+	// For listings the proxy makes itself (pinlist_test.go):
+	listHeaders []http.Header // each listing request's headers
+	listParams  []string      // each listing request's params, as sent
+	pageSize    int           // when set, listings are paginated, this many tools a page
+	failList    int           // when set, listings are answered with this HTTP status
 }
 
 func (s *toolServer) set(f func(*toolServer)) {
@@ -45,11 +51,16 @@ func (s *toolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
 		Params struct {
-			Name string `json:"name"`
+			Name   string `json:"name"`
+			Cursor string `json:"cursor"`
 		} `json:"params"`
 	}
 	body, _ := io.ReadAll(r.Body)
 	_ = json.Unmarshal(body, &m)
+	var raw struct {
+		Params json.RawMessage `json:"params"`
+	}
+	_ = json.Unmarshal(body, &raw)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if m.Method != "tools/list" {
@@ -59,11 +70,33 @@ func (s *toolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.accepted = append(s.accepted, r.Header.Get("Accept-Encoding"))
+	s.listHeaders = append(s.listHeaders, r.Header.Clone())
+	s.listParams = append(s.listParams, string(raw.Params))
+	if s.failList != 0 {
+		// An error status over a body that is a valid listing: only the
+		// status says not to trust it.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(s.failList)
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":`+string(m.ID)+`,"result":{"tools":[`+strings.Join(s.tools, ",")+`]}}`)
+		return
+	}
 	id := string(m.ID)
 	if s.answerID != "" {
 		id = s.answerID
 	}
-	answer := `{"jsonrpc":"2.0","id":` + id + `,"result":{"tools":[` + strings.Join(s.tools, ",") + `]}}`
+	tools, next := s.tools, ""
+	if s.pageSize > 0 {
+		start := 0
+		if m.Params.Cursor != "" {
+			start, _ = strconv.Atoi(m.Params.Cursor)
+		}
+		end := min(start+s.pageSize, len(s.tools))
+		tools = s.tools[start:end]
+		if end < len(s.tools) {
+			next = `,"nextCursor":"` + strconv.Itoa(end) + `"`
+		}
+	}
+	answer := `{"jsonrpc":"2.0","id":` + id + `,"result":{"tools":[` + strings.Join(tools, ",") + `]` + next + `}}`
 	var out io.Writer = w
 	switch {
 	case s.encoding != "":

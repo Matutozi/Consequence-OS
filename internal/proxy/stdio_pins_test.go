@@ -3,6 +3,7 @@ package proxy
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func listingLine(tools ...string) string {
@@ -89,5 +90,73 @@ func TestStdioServerRequests(t *testing.T) {
 	f.send(stdioCall(2, "modern", `{}`))
 	if got := f.recv(); !strings.Contains(got, `"isError":true`) || !strings.Contains(got, `policy rule \"no-password-prompts\"`) || strings.Contains(got, "input_required") {
 		t.Errorf("an input_required asking for a password: %s", got)
+	}
+}
+
+// A call before the client has listed the tools is still held to the
+// tool's definition: the wrapper lists the server itself, and the client
+// never sees that listing.
+func TestStdioCallBeforeAnyListing(t *testing.T) {
+	f := newStdioFixtureWith(t, true)
+	f.serverLists(listingLine(notesTool, refundDef))
+	f.send(stdioCall(1, "payments.refund", `{"charge_id":"ch_1","amount":5,"refund_all":true}`))
+	if got := f.recv(); !strings.Contains(got, `argument \"refund_all\" is not in the input schema stdio: test-server lists for payments.refund`) {
+		t.Fatalf("unnamed argument before any listing: %s", got)
+	}
+	f.send(stdioCall(2, "payments.refund", `{"charge_id":"ch_1","amount":5}`))
+	if got := f.recv(); !strings.Contains(got, "ran tools/call payments.refund") {
+		t.Errorf("a named call: %s", got)
+	}
+	// The server was asked once (this client sends no _meta, so neither
+	// does the listing); the client got only its two answers.
+	if n := strings.Count(f.received(), `"method":"tools/list"`); n != 1 || !strings.Contains(f.received(), `"id":"consequenceos-pin-1"`) {
+		t.Errorf("listings the server got: %d\n%s", n, f.received())
+	}
+	select {
+	case extra := <-f.lines:
+		t.Errorf("the client got a line it didn't ask for: %s", extra)
+	default:
+	}
+
+	f.send(stdioCall(3, "db.drop_table", `{"table":"users"}`))
+	if got := f.recv(); !strings.Contains(got, "db.drop_table isn't in the server's tool list") {
+		t.Errorf("a tool the server doesn't list: %s", got)
+	}
+}
+
+// A server that doesn't answer the wrapper's listing doesn't get the call.
+func TestStdioListingUnanswered(t *testing.T) {
+	old := pinWait
+	pinWait = 300 * time.Millisecond
+	defer func() { pinWait = old }()
+	f := newStdioFixtureWith(t, true)
+	// The server answers with an ID nobody asked for: that line is the
+	// client's to ignore, and the wrapper's listing goes unanswered.
+	f.serverLists(`{"jsonrpc":"2.0","id":"someone-else","result":{"tools":[]}}`)
+	f.send(stdioCall(1, "payments.refund", `{"charge_id":"ch_1","amount":5}`))
+	got := f.recv()
+	if strings.Contains(got, "someone-else") {
+		got = f.recv()
+	}
+	if !strings.Contains(got, "tool list couldn't be read") {
+		t.Errorf("unanswered listing: %s", got)
+	}
+	if strings.Contains(f.received(), `"method":"tools/call"`) {
+		t.Error("the call was forwarded")
+	}
+}
+
+// A client on 2026-07-28 sends _meta with each request; the wrapper's
+// listing carries the same, so the server reads it as that client's.
+func TestStdioListingSpeaksAsTheClient(t *testing.T) {
+	f := newStdioFixtureWith(t, true)
+	f.serverLists(listingLine(refundDef))
+	meta := `{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}`
+	f.send(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"payments.refund","arguments":{"charge_id":"ch_1","amount":5},"_meta":` + meta + `}}`)
+	if got := f.recv(); !strings.Contains(got, "ran tools/call payments.refund") {
+		t.Fatalf("call: %s", got)
+	}
+	if !strings.Contains(f.received(), `"method":"tools/list","params":{"_meta":`+meta+`}`) {
+		t.Errorf("the wrapper's listing didn't carry the client's _meta:\n%s", f.received())
 	}
 }
