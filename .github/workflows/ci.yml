@@ -1,7 +1,7 @@
 # Runs on every push to main and every pull request: formatting, go vet,
-# all Go tests with the race detector (Postgres store tests included), the
-# Python middleware's tests, and a Docker build so the quickstart image
-# can't break unnoticed.
+# all Go tests with the race detector (Postgres store tests included, and
+# consequence-anchor's, which is its own module), the Python middleware's
+# tests, and a Docker build so the quickstart image can't break unnoticed.
 name: CI
 
 on:
@@ -38,6 +38,9 @@ jobs:
       - name: gofmt and go vet
         run: make lint
       - name: Tests (race detector on)
+        run: go test -race -count=1 ./...
+      - name: consequence-anchor tests (its own module)
+        working-directory: cmd/consequence-anchor
         run: go test -race -count=1 ./...
 
   # The FastAPI/Starlette receiver middleware, on the oldest and newest

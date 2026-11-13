@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -53,6 +54,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // VerifyHandler serves GET /v1/audit/verify: it checks the whole hash chain
 // and answers with a ChainReport. It needs the admin token.
 //
+// With ?seq=N&hash=sha256:..., the place and hash of a head saved earlier,
+// the log must also still contain that entry, as with consequenced
+// -verify-audit -audit-head. An anchoring tool asks this before anchoring
+// a newer head, so it never vouches for a log that was cut back or rebuilt.
+//
 // check checks the signed head of the anchor the log starts from after
 // archiving, with the server's keys.
 func VerifyHandler(w Walker, check HeadChecker, adminToken string, log *slog.Logger) http.Handler {
@@ -60,7 +66,17 @@ func VerifyHandler(w Walker, check HeadChecker, adminToken string, log *slog.Log
 		if !requireAdmin(rw, r, adminToken) {
 			return
 		}
-		report, err := VerifyChainWith(r.Context(), w, &ChainVerifier{CheckHead: check})
+		v := &ChainVerifier{CheckHead: check}
+		if q := r.URL.Query(); q.Has("seq") || q.Has("hash") {
+			seq, err := strconv.ParseInt(q.Get("seq"), 10, 64)
+			hash := q.Get("hash")
+			if err != nil || seq < 1 || !strings.HasPrefix(hash, "sha256:") || len(q["seq"]) > 1 || len(q["hash"]) > 1 {
+				writeJSON(rw, http.StatusBadRequest, map[string]string{"error": "seq and hash go together: the place (1 or more) and the sha256:... hash of an entry the log must still contain"})
+				return
+			}
+			v.ExpectHead(seq, hash)
+		}
+		report, err := VerifyChainWith(r.Context(), w, v)
 		if err != nil {
 			log.Error("verify audit chain", "err", err)
 			writeJSON(rw, http.StatusInternalServerError, map[string]string{"error": "could not read the audit log"})
