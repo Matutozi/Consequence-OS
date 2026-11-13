@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -704,11 +705,37 @@ func (c *Config) validate() error {
 
 // NewEngine builds the policy engine this config describes.
 func (c *Config) NewEngine() (*policy.Engine, error) {
+	if err := c.checkRuleAgents(); err != nil {
+		return nil, err
+	}
 	var opts []policy.Option
 	if c.DefaultAllowBelow != nil {
 		opts = append(opts, policy.AllowBelow(*c.DefaultAllowBelow))
 	}
 	return policy.NewEngine(c.Rules, c.Tools, opts...)
+}
+
+// checkRuleAgents makes sure every agent a rule names is one this config
+// has: the agents, or the local modes' agent (the same file can serve
+// both). A misspelt name would leave a deny rule matching no one, which
+// fails open.
+func (c *Config) checkRuleAgents() error {
+	local := c.LocalAgent.ID
+	if local == "" {
+		local = DefaultLocalAgentID
+	}
+	known := []string{local}
+	for _, a := range c.Agents {
+		known = append(known, a.ID)
+	}
+	for i, r := range c.Rules {
+		for _, a := range r.Agents {
+			if a != "" && !slices.Contains(known, a) {
+				return fmt.Errorf("rule %d (%q): agents: %q isn't an agent in this config (it has %s)", i+1, r.Name, a, strings.Join(known, ", "))
+			}
+		}
+	}
+	return nil
 }
 
 func validateUpstream(raw string) error {

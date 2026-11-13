@@ -64,6 +64,7 @@ test:
 # The shipped config's policy tests; see "Testing a policy" in the README.
 test-policy:
 	go run ./cmd/consequenced -test consequence.test.yaml
+	go run ./cmd/consequenced -test examples/policies/elections.test.yaml
 
 test-postgres:
 	CONSEQUENCE_TEST_DATABASE_URL=$(TEST_DATABASE_URL) go test ./internal/store/

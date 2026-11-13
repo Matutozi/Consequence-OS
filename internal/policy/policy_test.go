@@ -1,9 +1,11 @@
 package policy
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // exampleRules mirrors the example policy from the project brief.
@@ -162,6 +164,8 @@ func TestNewEngineRejectsBadConfig(t *testing.T) {
 		{"eq with list", []Rule{{Name: "r", Tool: "x", When: Conditions{{Arg: "a", Op: OpEq, Value: []any{1}}}, Action: ActionAllow}}, nil, "must be a number"},
 		{"bad level", nil, Levels{"x": "dangerous"}, "unknown level"},
 		{"NUL in pattern", []Rule{{Name: "r", Tool: "a\x00b", Action: ActionAllow}}, nil, "bad tool pattern"},
+		{"empty agent", []Rule{{Name: "r", Tool: "x", Agents: []string{"a", " "}, Action: ActionAllow}}, nil, "agents: entry 2 is empty"},
+		{"agent twice", []Rule{{Name: "r", Tool: "x", Agents: []string{"a", "b", "a"}, Action: ActionAllow}}, nil, `agents: "a" is listed twice`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -209,5 +213,44 @@ func TestCatchAllRulesCoverReads(t *testing.T) {
 		if got := evaluate(t, engine, tool, nil); got.Rule != want {
 			t.Errorf("%s: rule %q, want %q", tool, got.Rule, want)
 		}
+	}
+}
+
+func TestRulesForSomeAgents(t *testing.T) {
+	ctx := context.Background()
+	e, err := NewEngine([]Rule{
+		{Name: "officer-transmits", Tool: "results.transmit", Agents: []string{"pu-officer", "backup-officer"}, Action: ActionAllow},
+		{Name: "no-one-else-transmits", Tool: "results.transmit", Action: ActionDeny},
+		{Name: "bot-never-publishes", Tool: "bulletin.*", Agents: []string{"voter-bot"}, Action: ActionDeny},
+		{Name: "publishing-asks", Tool: "bulletin.*", Action: ActionAsk},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		agent, tool string
+		want        Action
+		rule        string
+	}{
+		{"pu-officer", "results.transmit", ActionAllow, "officer-transmits"},
+		{"backup-officer", "results.transmit", ActionAllow, "officer-transmits"},
+		{"voter-bot", "results.transmit", ActionDeny, "no-one-else-transmits"},
+		{"PU-Officer", "results.transmit", ActionDeny, "no-one-else-transmits"}, // IDs are exact
+		{"", "results.transmit", ActionDeny, "no-one-else-transmits"},
+		{"voter-bot", "bulletin.publish", ActionDeny, "bot-never-publishes"},
+		{"comms-officer", "bulletin.publish", ActionAsk, "publishing-asks"},
+	} {
+		d, err := e.Decide(ctx, Call{AgentID: tc.agent, Tool: tc.tool, At: time.Now()}, nil)
+		if err != nil || d.Action != tc.want || d.Rule != tc.rule {
+			t.Errorf("%s calling %s: got %s by %q, %v; want %s by %q", tc.agent, tc.tool, d.Action, d.Rule, err, tc.want, tc.rule)
+		}
+	}
+
+	// The engine keeps its own copy of the list.
+	rules := []Rule{{Name: "r", Tool: "x", Agents: []string{"a"}, Action: ActionAllow}}
+	e, _ = NewEngine(rules, nil)
+	rules[0].Agents[0] = "b"
+	if d, _ := e.Decide(ctx, Call{AgentID: "a", Tool: "x", At: time.Now()}, nil); d.Rule != "r" {
+		t.Error("changing the caller's rules changed the engine's")
 	}
 }

@@ -232,6 +232,12 @@ rules:
 - **Missing or wrong-type arguments:** if the argument is missing or the wrong type (for example the amount sent as the text `"10"`), the condition doesn't match and the next rule is checked.
 - **When nothing matches:** calls scoring under `default_allow_below` are allowed and everything else asks. With the default scores, read tools are allowed and everything else asks.
 - **Globs:** `*` matches any run of characters and `?` any one, including `/`. So `resource:file:///etc/*` covers everything under `/etc`, and a catch-all `*` covers reads as well as tools.
+- **Roles:** `agents: [pu-officer]` limits a rule to calls from those agents, by their `id`; without it, a rule applies to every agent. IDs are compared exactly, and an agent's ID comes from the key it authenticates with, so it can't claim another's. Every agent named must be one the config has (or the local modes' `local_agent`), since a misspelt name would leave a deny rule matching no one. A role is an allow for the agents who hold it, followed by a rule for everyone else:
+
+  ```yaml
+  - { name: officers-transmit, tool: results.transmit, agents: [pu-officer], action: allow }
+  - { name: no-one-else-transmits, tool: results.transmit, action: deny }
+  ```
 
 **Allow what you trust, rather than deny what you fear.** A rule that matches text can be skipped by a spelling it didn't expect, and the call goes on to the next rule. For an `allow` rule that's safe: the call falls through and asks. For a `deny` or `ask` rule it isn't, especially when an allow-everything rule comes after it. Add `fold: true` to those, or list the values you allow and let everything else ask. `-check` warns about deny and ask rules that depend on exact text, and about deny and ask rules that match a `command` with `like`. A command can be written too many ways for a pattern to catch them all: `git push -f`, `git  push --force`, `sh -c '...'`. Allow the commands you trust instead:
 
@@ -245,6 +251,12 @@ rules:
   when: { arg: command, op: like, value: ["git status*", "git diff*", "git log*"] }
   action: allow                 # any other command falls through and asks
 ```
+
+### Policy packs
+
+Ready-made policies for one kind of work live in [`examples/policies/`](examples/policies/), each with its own tests. Copy one and rename its tools and agents for yours.
+
+- [`elections.yaml`](examples/policies/elections.yaml) is for an election-information assistant. No agent declares a result, and publishing and escalating wait for a person. Only the results officer transmits results. Survey answers are read only as aggregates over groups of five or more, and a bulletin that tells people how to vote is refused. Its [tests](examples/policies/elections.test.yaml) cover every rule.
 
 ### Testing a policy
 

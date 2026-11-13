@@ -256,8 +256,10 @@ func TestShippedConfigsLoad(t *testing.T) {
 		"CONSEQUENCE_ADMIN_TOKEN": "a", "CONSEQUENCE_SIGNING_KEY_ED25519": "e", "CONSEQUENCE_SIGNING_KEY_MLDSA87": "m",
 		"CONSEQUENCE_KEY_SUPPORT_BOT": "s", "CONSEQUENCE_KEY_RECEIVER_PAYMENTS": "r",
 		"CONSEQUENCE_DATABASE_URL": "postgres://x", "CONSEQUENCE_SMTP_URL": "smtp://mailpit:1025",
+		"CONSEQUENCE_KEY_RECEIVER_ELECTION_DATA": "ed", "CONSEQUENCE_KEY_VOTER_ASSISTANT": "va",
+		"CONSEQUENCE_KEY_RESULTS_OFFICER": "ro", "CONSEQUENCE_KEY_COMMS_OFFICER": "co", "CONSEQUENCE_KEY_ANALYST": "an",
 	})
-	for _, path := range []string{"../../consequence.yaml", "../../deploy/consequence.docker.yaml", "../../examples/policies.yaml"} {
+	for _, path := range []string{"../../consequence.yaml", "../../deploy/consequence.docker.yaml", "../../examples/policies.yaml", "../../examples/policies/elections.yaml"} {
 		t.Run(path, func(t *testing.T) {
 			data, err := os.ReadFile(path)
 			if err != nil {
@@ -618,5 +620,45 @@ func TestMode(t *testing.T) {
 	}
 	if cfg, err := ParseLocal([]byte("mode: observe\nstate_dir: /tmp/x\n"), env); err != nil || !cfg.Observe() {
 		t.Errorf("ParseLocal observe: %v", err)
+	}
+}
+
+func TestRuleAgents(t *testing.T) {
+	env := baseEnv(map[string]string{"KEY_A": "a", "KEY_B": "b"})
+	server := "upstream: http://localhost:9090/mcp\n" + base +
+		"owners: [{ id: o, approvers: [ada@o.example] }]\n" +
+		"agents:\n  - { id: pu-officer, owner_id: o, api_key_env: KEY_A }\n  - { id: voter-bot, owner_id: o, api_key_env: KEY_B }\n"
+	rule := func(agents string) string {
+		return "rules:\n  - { name: transmit, tool: results.transmit, agents: " + agents + ", action: allow }\n"
+	}
+	if _, err := Parse([]byte(server+rule("[pu-officer, voter-bot]")), env); err != nil {
+		t.Errorf("configured agents: %v", err)
+	}
+	// A misspelt agent would leave the rule matching no one.
+	if _, err := Parse([]byte(server+rule("[pu-oficer]")), env); err == nil || !strings.Contains(err.Error(), `"pu-oficer" isn't an agent in this config (it has local, pu-officer, voter-bot)`) {
+		t.Errorf("an unknown agent: %v", err)
+	}
+	if _, err := Parse([]byte(server+rule("[pu-officer, pu-officer]")), env); err == nil || !strings.Contains(err.Error(), "listed twice") {
+		t.Errorf("an agent twice: %v", err)
+	}
+
+	local := "state_dir: /x\n"
+	home := fakeEnv(map[string]string{"HOME": "/home/ada"})
+	if _, err := ParseLocal([]byte(local+rule("[local]")), home); err != nil {
+		t.Errorf("the local agent: %v", err)
+	}
+	if _, err := ParseLocal([]byte(local+"local_agent: { id: claude-code }\n"+rule("[claude-code]")), home); err != nil {
+		t.Errorf("a named local agent: %v", err)
+	}
+	if _, err := ParseLocal([]byte(local+rule("[someone]")), home); err == nil || !strings.Contains(err.Error(), `"someone" isn't an agent`) {
+		t.Errorf("an unknown local agent: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	if err := os.WriteFile(path, []byte(rule("[nobody]")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPolicy(path); err == nil || !strings.Contains(err.Error(), `"nobody" isn't an agent`) {
+		t.Errorf("policy tests read the same check: %v", err)
 	}
 }
