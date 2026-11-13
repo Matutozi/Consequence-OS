@@ -24,6 +24,8 @@ jobs:
           go-version-file: go.mod
       - run: make lint
       - run: go test -count=1 ./...
+      - run: go test -count=1 ./...
+        working-directory: cmd/consequence-anchor
 
   binaries:
     needs: test

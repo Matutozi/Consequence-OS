@@ -50,8 +50,11 @@ demo-personal:
 demo-rug-pull:
 	./scripts/demo-rug-pull.sh
 
+# consequence-anchor is its own module (it keeps Concordium's SDK out of
+# the server's dependencies), so ./... from here doesn't reach it.
 test:
 	go test ./...
+	cd cmd/consequence-anchor && go test ./...
 
 # The shipped config's policy tests; see "Testing a policy" in the README.
 test-policy:
@@ -72,6 +75,7 @@ dist:
 
 lint:
 	go vet ./...
+	cd cmd/consequence-anchor && go vet ./...
 	@unformatted=$$(gofmt -l .); \
 	if [ -n "$$unformatted" ]; then echo "gofmt needed:"; echo "$$unformatted"; exit 1; fi
 

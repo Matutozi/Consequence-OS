@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds release archives into dist/: one .tar.gz per platform holding
-# consequenced, mockmcp, the licence, the README and an example config,
-# plus SHA256SUMS. The release workflow runs this; so does `make dist`.
+# consequenced, mockmcp, consequence-anchor, the licence, the README and an
+# example config, plus SHA256SUMS. The release workflow runs this; so does `make dist`.
 #
 #   scripts/build-release.sh v0.1.0
 set -euo pipefail
@@ -22,6 +22,9 @@ for platform in "${PLATFORMS[@]}"; do
     CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
       -ldflags "-s -w -X main.version=$VERSION" -o "$stage/$cmd" "./cmd/$cmd"
   done
+  # consequence-anchor is its own module, so it's built from inside it.
+  (cd cmd/consequence-anchor && CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+    -ldflags "-s -w" -o "../../$stage/consequence-anchor" .)
   cp LICENSE README.md "$stage/"
   cp consequence.yaml "$stage/consequence.example.yaml"
   tar -C dist -czf "dist/$name.tar.gz" "$name"

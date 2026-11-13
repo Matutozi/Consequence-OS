@@ -153,20 +153,29 @@ func TestVerifyAndHeadHandlers(t *testing.T) {
 	tests := []struct {
 		name       string
 		handler    http.Handler
+		query      string
 		token      string
 		wantStatus int
 		wantBody   string
 	}{
-		{"verify needs the token", VerifyHandler(walker(entries), nil, "admin", log), "", 401, "admin token required"},
-		{"verify intact", VerifyHandler(walker(entries), nil, "admin", log), "admin", 200, `"intact":true`},
-		{"verify broken", VerifyHandler(walker(missing), nil, "admin", log), "admin", 200, `"broken_at":"aud_c"`},
-		{"head needs the token", HeadHandler(fakeHead{entries[2], true}, sign, "admin", log), "wrong", 401, "admin token required"},
-		{"head is signed", HeadHandler(fakeHead{entries[2], true}, sign, "admin", log), "admin", 200, `{"signed":3,"hash":"` + entries[2].Hash + `"}`},
-		{"empty log has no head", HeadHandler(fakeHead{}, sign, "admin", log), "admin", 404, "no chained entries"},
+		{"verify needs the token", VerifyHandler(walker(entries), nil, "admin", log), "", "", 401, "admin token required"},
+		{"verify intact", VerifyHandler(walker(entries), nil, "admin", log), "", "admin", 200, `"intact":true`},
+		{"verify broken", VerifyHandler(walker(missing), nil, "admin", log), "", "admin", 200, `"broken_at":"aud_c"`},
+		{"verify holds the log to a saved head", VerifyHandler(walker(entries), nil, "admin", log), "seq=2&hash=" + entries[1].Hash, "admin", 200, `"intact":true`},
+		{"a log cut back misses the saved head", VerifyHandler(walker(entries[:2]), nil, "admin", log), "seq=3&hash=" + entries[2].Hash, "admin", 200, `entry 3 from the saved head is missing`},
+		{"a rewritten entry doesn't match the saved head", VerifyHandler(walker(entries), nil, "admin", log), "seq=2&hash=" + entries[2].Hash, "admin", 200, `doesn't match the saved head`},
+		{"seq needs hash", VerifyHandler(walker(entries), nil, "admin", log), "seq=2", "admin", 400, "seq and hash go together"},
+		{"hash needs seq", VerifyHandler(walker(entries), nil, "admin", log), "hash=" + entries[1].Hash, "admin", 400, "seq and hash go together"},
+		{"seq starts at 1", VerifyHandler(walker(entries), nil, "admin", log), "seq=0&hash=" + entries[1].Hash, "admin", 400, "seq and hash go together"},
+		{"hash is a sha256", VerifyHandler(walker(entries), nil, "admin", log), "seq=2&hash=abc", "admin", 400, "seq and hash go together"},
+		{"one saved head at a time", VerifyHandler(walker(entries), nil, "admin", log), "seq=2&hash=" + entries[1].Hash + "&seq=3", "admin", 400, "seq and hash go together"},
+		{"head needs the token", HeadHandler(fakeHead{entries[2], true}, sign, "admin", log), "", "wrong", 401, "admin token required"},
+		{"head is signed", HeadHandler(fakeHead{entries[2], true}, sign, "admin", log), "", "admin", 200, `{"signed":3,"hash":"` + entries[2].Hash + `"}`},
+		{"empty log has no head", HeadHandler(fakeHead{}, sign, "admin", log), "", "admin", 404, "no chained entries"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/v1/audit/x", nil)
+			req := httptest.NewRequest(http.MethodGet, "/v1/audit/x?"+tt.query, nil)
 			if tt.token != "" {
 				req.Header.Set("Authorization", "Bearer "+tt.token)
 			}

@@ -45,6 +45,7 @@ It can also guard **Claude Code's own tools**, such as file edits and shell comm
 - [Consequence](docs/consequence.md): the score each call gets, the facts rules can match on, and what the assessment doesn't cover yet.
 - [ConsequenceOS on your own machine](docs/personal.md): guard Claude Code on your own repositories in five minutes, with `consequenced -init claude-code`.
 - [Guarding Claude Code](docs/claude-code.md): a policy on every file edit and shell command, as a Claude Code hook.
+- [Anchoring on Concordium](docs/concordium.md): register a guarded agent in Concordium's Agent Registry and anchor its audit log's head there, so anyone can check the log wasn't rewritten.
 - [Policy](#policy) and [configuration](#configuration) are below.
 
 ## Install
@@ -419,7 +420,9 @@ curl -s localhost:8080/v1/audit/head -H "Authorization: Bearer $CONSEQUENCE_ADMI
 consequenced -verify-audit -audit-head head-2026-11-04.json
 ```
 
-A head is signed with the same two keys as receipts, under its own type, so it can't pass as a receipt. Anyone with the public keys can check one, using `verify.VerifyAuditHead` in Go. `-verify-audit` exits with status 1 if anything was changed, so you can run it from cron or CI and alert on failure.
+A head is signed with the same two keys as receipts, under its own type, so it can't pass as a receipt. Anyone with the public keys can check one, using `verify.VerifyAuditHead` in Go. `-verify-audit` exits with status 1 if anything was changed, so you can run it from cron or CI and alert on failure. `GET /v1/audit/verify?seq=N&hash=sha256:...` runs the same check over HTTP.
+
+To save heads somewhere nobody can rewrite, `consequence-anchor` writes them into the agent's record in Concordium's Agent Registry, a public chain. Before each new head, it checks the log still contains the last one. See [Anchoring on Concordium](docs/concordium.md).
 
 ### Archiving old entries
 
@@ -543,7 +546,7 @@ The possible reasons are `malformed`, `unknown_key`, `bad_signature`, `not_canon
 | `POST /v1/receipts/verify` | receivers | Full receipt check, including single use. Needs a receiver key |
 | `GET /.well-known/consequence-keys` | receivers | Public keys as JWKS |
 | `GET /v1/audit` | owners | Audit log. Filters: `agent`, `tool`, `decision`, `since`, `until` (RFC 3339), `limit`. Needs the admin token |
-| `GET /v1/audit/verify` | owners | Checks the audit log's hash chain. Needs the admin token |
+| `GET /v1/audit/verify` | owners | Checks the audit log's hash chain; with `?seq=N&hash=sha256:...`, also that it still contains that entry from a saved head. Needs the admin token |
 | `GET /v1/audit/head` | owners, auditors | The newest audit entry's place and hash, signed. Needs the admin token |
 | `GET /healthz` | operators | Liveness check |
 
@@ -672,7 +675,7 @@ The Python middleware has its own tests:
 cd python && python -m venv .venv && . .venv/bin/activate && pip install -e '.[test]' && pytest
 ```
 
-CI runs `make lint`, all the Go tests with the race detector (including the Postgres store tests), the Python tests on Python 3.11 and 3.14, and a Docker build, on every push to `main` and every pull request.
+CI runs `make lint`, all the Go tests with the race detector (including the Postgres store tests and `consequence-anchor`'s), the Python tests on Python 3.11 and 3.14, and a Docker build, on every push to `main` and every pull request.
 
 **Overhead.** On a 2017 laptop CPU (i7-7820HQ), the proxy adds about 1.5 ms to an allowed call. Most of that is signing the receipt with both keys. A denied call takes about 0.05 ms, because it never reaches the upstream. These figures use the in-memory store; with Postgres, each call also waits for one audit write.
 
@@ -700,6 +703,7 @@ Code layout:
 
 - `cmd/consequenced`: the server.
 - `cmd/mockmcp`: the fake upstream and receiver.
+- `cmd/consequence-anchor`: registers an agent in Concordium's Agent Registry and anchors audit heads there. It's its own Go module, so Concordium's SDK and gRPC stay out of the server's dependencies; `make test` and `make lint` cover it.
 - `internal/gate`: the decision path for every gated call: assessing it, the policy, approvals, limits and the audit log. It never answers the agent, so each way in is a thin adapter over it.
 - `internal/proxy`: the HTTP adapter. It authenticates agents, parses MCP messages, words the gate's answer, and forwards allowed calls with a receipt.
 - `internal/policy`, `internal/consequence`, `internal/approval`, `internal/receipt`, `internal/audit`, `internal/store`, `internal/config`: the parts the gate and the proxy are built from.
@@ -727,7 +731,8 @@ This is an early MVP. Built:
 - archiving old audit entries to a file that can be checked on its own, without breaking the chain;
 - policy checks on what the server asks of the client: elicitation, sampling and roots;
 - observe mode, which decides and audits every call but stops none, and a report of what was or would have been stopped;
-- policy tests: a table of calls and the decisions they should get, run with `consequenced -test` in CI.
+- policy tests: a table of calls and the decisions they should get, run with `consequenced -test` in CI;
+- audit heads anchored in Concordium's Agent Registry, with `consequence-anchor`, under an on-chain agent identity anyone can check.
 
 Not yet:
 - passkey-signed approvals.
