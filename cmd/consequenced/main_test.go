@@ -95,13 +95,21 @@ func TestShippedConfigsHaveNoWarnings(t *testing.T) {
 	t.Setenv("CONSEQUENCE_KEY_RECEIVER_PAYMENTS", "dev-receiver")
 	t.Setenv("CONSEQUENCE_SIGNING_KEY_ED25519", os.Getenv("TEST_CONSEQUENCED_ED"))
 	t.Setenv("CONSEQUENCE_SIGNING_KEY_MLDSA87", os.Getenv("TEST_CONSEQUENCED_ML"))
-	for _, path := range []string{"../../consequence.yaml", "../../examples/policies.yaml"} {
+	// The elections pack's own keys, one per role.
+	for i, k := range []string{"CONSEQUENCE_KEY_RECEIVER_ELECTION_DATA", "CONSEQUENCE_KEY_VOTER_ASSISTANT", "CONSEQUENCE_KEY_RESULTS_OFFICER", "CONSEQUENCE_KEY_COMMS_OFFICER", "CONSEQUENCE_KEY_ANALYST"} {
+		t.Setenv(k, fmt.Sprintf("dev-elections-%d", i))
+	}
+	for _, path := range []string{"../../consequence.yaml", "../../examples/policies.yaml", "../../examples/policies/elections.yaml"} {
 		var out bytes.Buffer
 		if err := run(context.Background(), []string{"-config", path, "-check"}, &out); err != nil {
 			t.Fatalf("%s: %v", path, err)
 		}
 		if strings.Contains(out.String(), "warnings (") {
 			t.Errorf("%s has policy warnings:\n%s", path, out.String())
+		}
+		// Rules for some agents say whose they are.
+		if strings.HasSuffix(path, "elections.yaml") && !strings.Contains(out.String(), "6. officer-transmits: results.transmit by results-officer -> allow\n") {
+			t.Errorf("-check doesn't say whose rule officer-transmits is:\n%s", out.String())
 		}
 	}
 }
@@ -938,9 +946,14 @@ func TestShippedPolicyTests(t *testing.T) {
 	for _, k := range []string{"CONSEQUENCE_ADMIN_TOKEN", "CONSEQUENCE_SIGNING_KEY_ED25519", "CONSEQUENCE_KEY_SUPPORT_BOT"} {
 		t.Setenv(k, "")
 	}
-	var out bytes.Buffer
-	if err := run(context.Background(), []string{"-test", "../../consequence.test.yaml"}, &out); err != nil {
-		t.Errorf("consequence.test.yaml: %v\n%s", err, out.String())
+	for _, path := range []string{"../../consequence.test.yaml", "../../examples/policies/elections.test.yaml"} {
+		var out bytes.Buffer
+		if err := run(context.Background(), []string{"-test", path}, &out); err != nil {
+			t.Errorf("%s: %v\n%s", path, err, out.String())
+		}
+		if strings.Contains(out.String(), "no case reaches") {
+			t.Errorf("%s leaves rules untested:\n%s", path, out.String())
+		}
 	}
 }
 

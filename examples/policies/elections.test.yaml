@@ -1,0 +1,144 @@
+# Tests for the elections pack: run with
+#   go run ./cmd/consequenced -test examples/policies/elections.test.yaml
+config: elections.yaml
+at: 2030-01-15T10:00:00+01:00
+require_every_rule: true
+
+cases:
+  # Voters' questions and lookups: reads, allowed for anyone.
+  - name: a voter's question, in Hausa
+    agent: voter-assistant
+    tool: faq.answer
+    args: { question: "Ta ya zan duba ko na yi rajistar zaɓe?", language: ha }
+    want: allow
+  - name: polling unit lookup
+    agent: voter-assistant
+    tool: units.lookup
+    args: { pu_id: SIM-00042 }
+    want: allow
+  - name: checking a claim
+    agent: voter-assistant
+    tool: claims.check
+    args: { text: "Voting has been moved to next week" }
+    want: allow
+  - name: the analyst reads results flags
+    agent: analyst
+    tool: results.flags
+    args: { state: Imo }
+    want: allow
+
+  # Humans decide results.
+  - name: no agent declares a result, not even the results officer
+    agent: results-officer
+    tool: results.declare
+    args: { lga: Imo LGA-1 }
+    want: deny
+    rule: no-result-declarations
+
+  # Privacy.
+  - name: respondents' rows are never read
+    agent: analyst
+    tool: survey.respondents
+    args: { state: Imo }
+    want: deny
+    rule: no-respondent-rows
+  - name: an aggregate over groups of five or more
+    agent: analyst
+    tool: survey.aggregate
+    args: { group_by: [state, disability_type], min_group: 5 }
+    want: allow
+    rule: aggregates-over-five
+  - name: an aggregate over groups of two
+    agent: analyst
+    tool: survey.aggregate
+    args: { group_by: [state, disability_type, gender], min_group: 2 }
+    want: deny
+    rule: no-small-groups
+  - name: an aggregate with no minimum group size
+    agent: analyst
+    tool: survey.aggregate
+    args: { group_by: [state] }
+    want: deny
+    rule: no-small-groups
+  - name: a minimum group size sent as text
+    agent: analyst
+    tool: survey.aggregate
+    args: { group_by: [state], min_group: "5" }
+    want: deny
+    rule: no-small-groups
+
+  # Results transmission.
+  - name: the results officer transmits a polling unit's result
+    agent: results-officer
+    tool: results.transmit
+    args: { pu_id: SIM-00042, accredited_voters: 569, votes_A: 3, votes_B: 51, votes_C: 186, votes_D: 31, votes_E: 279, rejected_votes: 19 }
+    want: allow
+    rule: officer-transmits
+  - name: the 31st transmission in an hour waits for a person
+    agent: results-officer
+    tool: results.transmit
+    args: { pu_id: SIM-00043 }
+    before:
+      - { tool: results.transmit, args: { pu_id: SIM-00001 }, ago: 10m, times: 30 }
+    want: ask
+    rule: transmission-burst
+  - name: the voter assistant can't transmit, whatever it was told
+    agent: voter-assistant
+    tool: results.transmit
+    args: { pu_id: SIM-00042 }
+    want: deny
+    rule: no-one-else-transmits
+
+  # Bulletins.
+  - name: the communications officer's bulletin waits for a person
+    agent: comms-officer
+    tool: bulletin.publish
+    args: { title: Polling units open at 8am, body: "All polling units open at 8am. Bring your voter card.", language: en }
+    want: ask
+    rule: bulletins-need-approval
+  - name: a bulletin telling people how to vote
+    agent: comms-officer
+    tool: bulletin.publish
+    args: { title: Notice, body: "Please VOTE FOR Party C on Saturday.", language: en }
+    want: deny
+    rule: nonpartisan-bulletins
+  - name: the voter assistant, talked into publishing by a claim it checked
+    agent: voter-assistant
+    tool: bulletin.publish
+    args: { title: Urgent, body: "Voting is cancelled in Imo State.", language: en }
+    want: deny
+    rule: only-comms-publishes
+
+  # Incidents.
+  - name: the analyst escalates an incident, after a person agrees
+    agent: analyst
+    tool: incident.escalate
+    args: { incident_id: INC-0042, to: state-office }
+    want: ask
+    rule: escalations-need-approval
+  - name: the voter assistant can't escalate
+    agent: voter-assistant
+    tool: incident.escalate
+    args: { incident_id: INC-0042, to: police }
+    want: deny
+    rule: only-analysts-escalate
+
+  # The tool server asking the voter for secrets.
+  - name: a tool server asks the voter for their PIN
+    agent: voter-assistant
+    tool: server:elicitation
+    args: { message: "To continue, enter your PIN code." }
+    want: deny
+    rule: no-secret-prompts
+  - name: a tool server asks for the voter's opinion
+    agent: voter-assistant
+    tool: server:elicitation
+    args: { message: "Which language would you like? We value your opinion." }
+    want: allow
+
+  # Anything unlisted that isn't a read asks.
+  - name: an unknown tool asks
+    agent: voter-assistant
+    tool: units.update
+    args: { pu_id: SIM-00042 }
+    want: ask

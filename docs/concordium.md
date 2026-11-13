@@ -121,6 +121,24 @@ The card is an [A2A Agent Card](https://a2a-protocol.org) with two extensions in
 
 A card with this extension twice, or with other params in it, is refused. A later version gets a new `uri`.
 
+## The demo
+
+`scripts/demo-concordium.sh` (or `make demo-concordium`) runs the whole story on testnet, against a local server and the mock tool server:
+
+1. The agent's calls are allowed, denied and held, and logged.
+2. The head is anchored, and `verify` checks the agent from the chain.
+3. An insider deletes the held $5,000 refund from the log on disk. The server's own chain check still says **intact**, because what's left is a valid chain.
+4. `anchor` refuses, since the log no longer contains the head on-chain, and `-verify-audit -audit-head` names the missing entry.
+5. The log is put back, so the demo can run again.
+
+```bash
+export CONCORDIUM_ACCOUNT=~/my-account.export
+CARD_URL=https://raw.githubusercontent.com/you/repo/main/refund-bot.json scripts/demo-concordium.sh setup   # once
+scripts/demo-concordium.sh                                                                                  # each time
+```
+
+`setup` registers the agent, writes its card and waits while you host it, then pins it. Each run sends one transaction. The server's keys, log and anchored heads stay in `~/.consequence/concordium-demo` (`DEMO_DIR`), because the chain holds anchors of that log.
+
 ## Limits
 
 - **An agent with an external reference can't be read.** An external reference is a key on another chain, bound with CIS-8. The registry's binary format for it isn't documented, and the fields after it can only be found by reading it. `consequence-anchor` registers agents without one.

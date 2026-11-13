@@ -1,0 +1,146 @@
+# Policy pack: an election-information assistant.
+#
+# AI agents that help an election body: answer voters' questions, look up
+# polling units, check claims against known misinformation, flag results
+# that don't add up, and draft public bulletins. The rules follow what
+# election work demands of automated tools:
+#
+#   - Humans decide. No agent declares a result, and nothing an agent
+#     publishes or escalates leaves without a person's approval.
+#   - Roles. Each agent has its own key, and only the results officer may
+#     transmit results; only the communications officer may publish.
+#   - Privacy. Survey answers about disability, gender and age are read
+#     only as aggregates over groups of five or more people, never by row.
+#   - Nonpartisan. A bulletin that tells people how to vote is refused
+#     before it reaches an approver.
+#
+# The tool names are those of the reference tool server in the AI4Elections
+# prototype; rename them for yours. Check this file with
+#   go run ./cmd/consequenced -config examples/policies/elections.yaml -check
+# and its tests with
+#   go run ./cmd/consequenced -test examples/policies/elections.test.yaml
+
+upstream: "http://127.0.0.1:9090/mcp"
+upstream_receiver: election-data
+admin_token_env: CONSEQUENCE_ADMIN_TOKEN
+receipts:
+  ed25519_key_env: CONSEQUENCE_SIGNING_KEY_ED25519
+  mldsa87_key_env: CONSEQUENCE_SIGNING_KEY_MLDSA87
+owners:
+  - id: election-office
+    approvers: [duty-officer@election-office.example]
+receivers:
+  # The tool server checks every receipt, so a call that didn't come
+  # through here, or was changed on the way, is refused there too.
+  - id: election-data
+    api_key_env: CONSEQUENCE_KEY_RECEIVER_ELECTION_DATA
+
+# One agent per role, each with its own key: an agent's role comes from the
+# key it authenticates with, so a voter-facing bot that is talked into
+# acting as an officer still calls as the voter-facing bot.
+agents:
+  - id: voter-assistant      # answers the public
+    owner_id: election-office
+    api_key_env: CONSEQUENCE_KEY_VOTER_ASSISTANT
+  - id: results-officer      # transmits polling-unit results
+    owner_id: election-office
+    api_key_env: CONSEQUENCE_KEY_RESULTS_OFFICER
+  - id: comms-officer        # drafts public bulletins
+    owner_id: election-office
+    api_key_env: CONSEQUENCE_KEY_COMMS_OFFICER
+  - id: analyst              # reviews flags and incidents
+    owner_id: election-office
+    api_key_env: CONSEQUENCE_KEY_ANALYST
+
+# Reads are allowed unless a rule says otherwise; everything else asks.
+default_allow_below: 20
+tools:
+  faq.answer: read
+  units.lookup: read
+  claims.check: read
+  results.unit: read
+  results.flags: read
+  incidents.summary: read
+  survey.aggregate: read
+  survey.respondents: read
+  incident.escalate: irreversible
+  bulletin.publish: irreversible
+  results.transmit: irreversible
+  results.declare: irreversible
+
+rules:
+  # Humans decide results. Tools may flag; no agent declares.
+  - name: no-result-declarations
+    tool: results.declare
+    action: deny
+
+  # Privacy: respondents' rows are never read by an agent, and aggregates
+  # only over groups of five or more. Allow what's safe, then refuse the
+  # rest, so a call without min_group, or with it as text, is refused too.
+  - name: no-respondent-rows
+    tool: survey.respondents
+    action: deny
+  - name: aggregates-over-five
+    tool: survey.aggregate
+    when: { arg: min_group, op: gte, value: 5 }
+    action: allow
+  - name: no-small-groups
+    tool: survey.aggregate
+    action: deny
+
+  # Results transmission: the results officer only. A burst is unusual
+  # (a polling unit sends once), so past 30 an hour a person looks first.
+  - name: transmission-burst
+    tool: results.transmit
+    agents: [results-officer]
+    limit: { max: 30, per: 1h }
+    action: ask
+  - name: officer-transmits
+    tool: results.transmit
+    agents: [results-officer]
+    action: allow
+  - name: no-one-else-transmits
+    tool: results.transmit
+    action: deny
+
+  # Bulletins: nothing that tells people how to vote, from anyone; then
+  # the communications officer's drafts wait for a person, and no other
+  # agent publishes at all.
+  - name: nonpartisan-bulletins
+    tool: bulletin.publish
+    when:
+      - arg: body
+        op: like
+        value: ["*vote for*", "*vote against*", "*don't vote*", "*do not vote*", "*support party*", "*elect party*"]
+        fold: true
+    action: deny
+  - name: bulletins-need-approval
+    tool: bulletin.publish
+    agents: [comms-officer]
+    action: ask
+  - name: only-comms-publishes
+    tool: bulletin.publish
+    action: deny
+
+  # Escalating an incident to the authorities affects people: a person
+  # decides, and only the analyst may ask.
+  - name: escalations-need-approval
+    tool: incident.escalate
+    agents: [analyst]
+    action: ask
+  - name: only-analysts-escalate
+    tool: incident.escalate
+    action: deny
+
+  # A tool server must not use the agent to ask a voter for secrets.
+  - name: no-secret-prompts
+    tool: server:elicitation
+    when:
+      - arg: message
+        op: like
+        # Whole phrases: "*pin*" would also catch "opinion", "*nin*" "morning".
+        value: ["*password*", "*passcode*", "*pin code*", "*pin number*", "*your pin*", "*voter card number*",
+                "*voter identification number*", "*bvn*", "*nin number*", "*national identification number*",
+                "*one-time code*", "* otp*"]
+        fold: true
+    action: deny

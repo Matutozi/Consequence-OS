@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/matutozi/consequence-os/internal/consequence"
@@ -28,12 +29,17 @@ const DefaultRule = "default"
 const DefaultAllowBelow = 20
 
 // Rule matches tool calls by tool name (glob allowed). Everything else it
-// sets must hold too: the argument conditions, the consequence conditions,
-// the time window, and the limit.
+// sets must hold too: the agents, the argument conditions, the consequence
+// conditions, the time window, and the limit.
 type Rule struct {
-	Name string     `yaml:"name"`
-	Tool string     `yaml:"tool"`
-	When Conditions `yaml:"when,omitempty"` // nil means "no conditions"
+	Name string `yaml:"name"`
+	Tool string `yaml:"tool"`
+	// Agents limits the rule to calls from these agents, by ID: a role,
+	// such as only the results officer may transmit results. Empty means
+	// every agent. IDs are compared exactly; an agent's ID comes from the
+	// key it authenticates with, not from anything it sends.
+	Agents []string   `yaml:"agents,omitempty"`
+	When   Conditions `yaml:"when,omitempty"` // nil means "no conditions"
 	// Consequence holds conditions on the call's assessment, written like
 	// When, with a fact as the arg: { arg: score, op: gte, value: 70 }.
 	Consequence Conditions `yaml:"consequence,omitempty"`
@@ -124,6 +130,7 @@ func NewEngine(rules []Rule, levels Levels, opts ...Option) (*Engine, error) {
 func (e *Engine) Static() consequence.Static { return e.static }
 
 func copyRule(r Rule) Rule {
+	r.Agents = append([]string(nil), r.Agents...)
 	r.When = append(Conditions(nil), r.When...)
 	r.Consequence = append(Conditions(nil), r.Consequence...)
 	if r.During != nil {
@@ -154,6 +161,14 @@ func validateRule(r *Rule) error {
 	}
 	if !validPattern(r.Tool) {
 		return fmt.Errorf("bad tool pattern %q", r.Tool)
+	}
+	for i, a := range r.Agents {
+		if strings.TrimSpace(a) == "" {
+			return fmt.Errorf("agents: entry %d is empty", i+1)
+		}
+		if slices.Contains(r.Agents[:i], a) {
+			return fmt.Errorf("agents: %q is listed twice", a)
+		}
 	}
 	switch r.Action {
 	case ActionAllow, ActionAsk, ActionDeny:
@@ -220,6 +235,8 @@ func (r *Rule) matches(ctx context.Context, c Call, usage UsageCounter) (bool, e
 	loose := r.Action != ActionAllow
 	switch {
 	case !matchTool(r.Tool, c.Tool):
+		return false, nil
+	case len(r.Agents) > 0 && !slices.Contains(r.Agents, c.AgentID):
 		return false, nil
 	case r.During != nil && !r.During.contains(c.At):
 		return false, nil

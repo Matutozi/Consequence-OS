@@ -993,7 +993,11 @@ func printPolicy(out io.Writer, cfg *config.Config) {
 
 	fmt.Fprintf(out, "  rules (%d), first match wins:\n", len(cfg.Rules))
 	for i, r := range cfg.Rules {
-		fmt.Fprintf(out, "    %d. %s: %s -> %s%s%s%s\n", i+1, r.Name, r.Tool, r.Action,
+		by := ""
+		if len(r.Agents) > 0 {
+			by = " by " + strings.Join(r.Agents, ", ")
+		}
+		fmt.Fprintf(out, "    %d. %s: %s%s -> %s%s%s%s\n", i+1, r.Name, r.Tool, by, r.Action,
 			describeConds(" when ", r.When), describeConds(" when consequence ", r.Consequence), describeExtras(r))
 	}
 	fmt.Fprintf(out, "  when no rule matches: calls scoring under %d are allowed, the rest ask\n", *cfg.DefaultAllowBelow)

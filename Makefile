@@ -18,7 +18,7 @@ export CONSEQUENCE_SIGNING_KEY_MLDSA87 ?= d981o8Ahw7SPWkniT-C-PSaH-CDeOSX9aZCCf4
 # and drop throwaway databases.
 TEST_DATABASE_URL ?= postgres://postgres:test@127.0.0.1:55432/postgres
 
-.PHONY: run check mock demo demo-approval demo-receipts demo-personal demo-rug-pull test test-policy test-postgres bench lint dist env up down logs
+.PHONY: run check mock demo demo-approval demo-receipts demo-personal demo-rug-pull demo-concordium test test-policy test-postgres bench lint dist env up down logs
 
 run:
 	go run ./cmd/consequenced -config $(CONFIG)
@@ -50,6 +50,11 @@ demo-personal:
 demo-rug-pull:
 	./scripts/demo-rug-pull.sh
 
+# The audit log's head anchored on Concordium testnet, then a deleted entry
+# caught by it. Needs CONCORDIUM_ACCOUNT; see docs/concordium.md.
+demo-concordium:
+	./scripts/demo-concordium.sh
+
 # consequence-anchor is its own module (it keeps Concordium's SDK out of
 # the server's dependencies), so ./... from here doesn't reach it.
 test:
@@ -59,6 +64,7 @@ test:
 # The shipped config's policy tests; see "Testing a policy" in the README.
 test-policy:
 	go run ./cmd/consequenced -test consequence.test.yaml
+	go run ./cmd/consequenced -test examples/policies/elections.test.yaml
 
 test-postgres:
 	CONSEQUENCE_TEST_DATABASE_URL=$(TEST_DATABASE_URL) go test ./internal/store/
