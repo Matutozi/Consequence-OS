@@ -1,0 +1,15 @@
+# Which arguments carry each tool's context, for cmd/shadow-score.
+internal_domains: [acme.com]
+
+tools:
+  crm.delete_contacts: { records: contact_ids }
+  crm.export_contacts: { records: contact_ids, destination: to }
+  email.send:          { records: to, destination: to }
+
+# The defaults, written out so they're easy to change and rerun.
+weights:
+  few: 1.25      # 2 to 99 records
+  many: 1.5      # 100 or more, or a count that can't be read
+  many_at: 100
+  external: 1.5  # any destination outside acme.com
+  internal: 1    # every destination inside

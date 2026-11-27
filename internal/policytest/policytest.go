@@ -192,18 +192,9 @@ func run(ctx context.Context, engine *policy.Engine, f *File, c Case, defaultAt 
 	if agent == "" {
 		agent = "test-agent"
 	}
-	args, err := f.callArgs(c.Tool, c.Args, c.Cwd)
+	args, err := f.CaseArgs(c)
 	if err != nil {
 		return "", "", err
-	}
-	if c.Set.Kind != 0 {
-		set, err := f.callArgs("", c.Set, "")
-		if err != nil {
-			return "", "", err
-		}
-		for k, v := range set {
-			args[k] = v
-		}
 	}
 	// Earlier calls are recorded as the gate records calls that go ahead.
 	usage := store.NewMemory()
@@ -236,6 +227,25 @@ func run(ctx context.Context, engine *policy.Engine, f *File, c Case, defaultAt 
 		return "", "", err
 	}
 	return d.Action, d.Rule, nil
+}
+
+// CaseArgs gives the arguments the gate would see for case c: its args as
+// JSON's types, the hook's derived arguments for hook cases, then set.
+func (f *File) CaseArgs(c Case) (map[string]any, error) {
+	args, err := f.callArgs(c.Tool, c.Args, c.Cwd)
+	if err != nil {
+		return nil, err
+	}
+	if c.Set.Kind != 0 {
+		set, err := f.callArgs("", c.Set, "")
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range set {
+			args[k] = v
+		}
+	}
+	return args, nil
 }
 
 // callArgs makes a case's arguments what the gate would see: JSON's

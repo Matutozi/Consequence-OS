@@ -1,0 +1,24 @@
+# The policy for the shadow-score experiment (cmd/shadow-score). A support
+# agent works on a CRM. Hard rules come first; the score rule decides the
+# calls they leave open; the convenience allow comes last.
+
+default_allow_below: 20
+
+tools:
+  crm.get_contact: read
+  crm.export_contacts: read      # it only reads the CRM, wherever it sends the rows
+  crm.delete_contacts: reversible # contacts go to the trash for 30 days
+  email.send: irreversible
+
+rules:
+  - name: no-wipe-all
+    tool: crm.delete_contacts
+    when: { arg: all, op: eq, value: true }
+    action: deny
+  - name: high-consequence-asks
+    tool: "*"
+    consequence: { arg: score, op: gte, value: 70 }
+    action: ask
+  - name: support-deletes-contacts
+    tool: crm.delete_contacts
+    action: allow

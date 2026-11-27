@@ -60,7 +60,7 @@ default_allow_below: 20
 
 ## What it doesn't cover
 
-- **Arguments.** The tools map scores a tool, not a call. Deleting one row and deleting every row score the same. Use `when:` conditions on the arguments for that, or a consequence map once it exists.
+- **Arguments.** The tools map scores a tool, not a call. Deleting one row and deleting every row score the same. Use `when:` conditions on the arguments for that, or a consequence map once it exists. [shadow-score.md](shadow-score.md) tests multiplying the score by the call's context instead. With the weights tried there, it changed no decision, and rules on the arguments did better.
 - **The facts beyond score and reversibility.** `blast_radius`, `data_classes`, `owners` and `targets` are always empty with the tools map alone. Rules on them are valid but never match until a consequence map supplies them.
 - **Compensable actions.** A `compensable` assessment scores as irreversible, until undo contracts can show the compensation really runs.
 - **Reasons in the audit log.** Only the score is logged. A consequence map may build reasons from the arguments, which the log never holds.
