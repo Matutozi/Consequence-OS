@@ -10,14 +10,14 @@ Every call is recorded in a hash-chained audit log on your machine. Nothing leav
 
 ## Setting it up
 
-For the five-minute version, see [ConsequenceOS on your own machine](personal.md). In short, from the project to guard:
+For the five-minute version, see [ConsequenceOS on your own machine](personal.md). The quickest way is the [Claude Code plugin](../plugins/consequenceos/README.md): `/plugin install consequenceos --marketplace Matutozi/Consequence-OS`. It runs the same hook on the same policy file. By hand, from the project to guard:
 
 ```bash
 consequenced -init claude-code            # this project, in .claude/settings.local.json
 consequenced -init claude-code -global    # every project, in ~/.claude/settings.json
 ```
 
-It writes the starter policy to `~/.consequence/claude-code.yaml`, unless one is there, and shows the hook entry before adding it. `-config` puts the policy elsewhere; its state goes in a `state` folder beside it. `-yes` skips the question. Change the rules in that file, then check them with `consequenced -hook claude-code -check`. It prints the rules and warns about risky ones. The starter's source, with a comment on every rule, is [internal/hook/starter.yaml](../internal/hook/starter.yaml).
+It writes the starter policy to `~/.consequence/claude-code.yaml`, unless one is there, and shows the hook entry before adding it. `-policy-only` writes the policy and leaves the settings alone; the plugin runs it the first time. `-config` puts the policy elsewhere; its state goes in a `state` folder beside it. `-yes` skips the question. Change the rules in that file, then check them with `consequenced -hook claude-code -check`. It prints the rules and warns about risky ones. The starter's source, with a comment on every rule, is [internal/hook/starter.yaml](../internal/hook/starter.yaml).
 
 ### By hand
 

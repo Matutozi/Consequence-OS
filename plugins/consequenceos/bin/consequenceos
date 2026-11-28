@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# The ConsequenceOS plugin's hook: a policy on every tool call Claude Code
+# makes, decided by consequenced -hook claude-code.
+#
+#   consequenceos setup   at the start of a session: install consequenced
+#                         and write the starter policy, if they aren't there
+#   consequenceos hook    before each tool call: the same, then the policy
+#                         decides the call
+#
+# consequenced is the release VERSION names, downloaded once into the
+# plugin's data folder. The download must match SHA256SUMS beside this
+# script, which ships inside the plugin, so a release file swapped after
+# the plugin was published never runs. CONSEQUENCEOS_BIN runs another
+# consequenced instead, such as one built from source.
+#
+# It fails closed: if consequenced can't be installed, or the policy can't
+# be written, the hook exits 2 and Claude Code blocks the call.
+set -uo pipefail
+
+VERSION=v0.6.0
+REPO=https://github.com/Matutozi/Consequence-OS
+
+mode="${1:-hook}"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+data="${CLAUDE_PLUGIN_DATA:-$HOME/.consequence/plugin}"
+policy="${CONSEQUENCEOS_POLICY:-$HOME/.consequence/claude-code.yaml}"
+
+fail() {
+  if [ "$mode" = hook ]; then
+    echo "ConsequenceOS blocked this call: $*" >&2
+    exit 2
+  fi
+  echo "ConsequenceOS isn't ready, so it will block every tool call: $*" >&2
+  exit 1
+}
+
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+# install downloads consequenced VERSION for this machine into $bin, after
+# checking the archive against the plugin's SHA256SUMS. On a slow link the
+# download can outlast a hook's timeout, so it resumes: what arrived stays
+# in a .part file, and the next run carries on from there. A lock keeps
+# calls made at the same time from writing to that file together.
+install() {
+  local os arch name want got tmp url protos part lock
+  case "$(uname -s)" in
+    Linux) os=linux ;;
+    Darwin) os=darwin ;;
+    *) fail "consequenced runs on Linux and macOS, not $(uname -s)" ;;
+  esac
+  case "$(uname -m)" in
+    x86_64 | amd64) arch=amd64 ;;
+    arm64 | aarch64) arch=arm64 ;;
+    *) fail "there's no consequenced build for $(uname -m)" ;;
+  esac
+  name="consequenceos_${VERSION}_${os}_${arch}"
+  want="$(awk -v f="$name.tar.gz" '$2 == f { print $1 }' "$root/SHA256SUMS" 2>/dev/null)"
+  [ -n "$want" ] || fail "this plugin has no checksum for $name.tar.gz, so it can't install consequenced. Install consequenced yourself and set CONSEQUENCEOS_BIN to its path"
+  command -v curl >/dev/null 2>&1 || fail "curl is needed to install consequenced"
+
+  mkdir -p "$data/$VERSION" || fail "can't create $data/$VERSION"
+  lock="$data/.install.lock"
+  if ! mkdir "$lock" 2>/dev/null; then
+    # A lock left by a run that was killed outright is cleared after 10 minutes.
+    if [ -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ] && rm -rf "$lock" && mkdir "$lock" 2>/dev/null; then
+      :
+    else
+      fail "consequenced $VERSION is still being downloaded; try again in a minute"
+    fi
+  fi
+  tmp=""
+  trap 'rm -rf "$lock" ${tmp:+"$tmp"}' EXIT
+  trap 'exit 143' TERM INT HUP
+
+  part="$data/$name.tar.gz.part"
+  if [ ! -f "$part" ] || [ "$(sha256 "$part")" != "$want" ]; then
+    url="$REPO/releases/download/$VERSION"
+    protos='=https'
+    if [ -n "${CONSEQUENCEOS_DOWNLOAD_URL:-}" ]; then
+      # A mirror, or a local folder for tests. The checksum still has to match.
+      url="$CONSEQUENCEOS_DOWNLOAD_URL"
+      protos='=https,file'
+    fi
+    curl -fsSL --proto "$protos" --tlsv1.2 --retry 2 -C - -o "$part" "$url/$name.tar.gz" ||
+      fail "couldn't download consequenced $VERSION from $url; the next call carries on where this one stopped"
+  fi
+  got="$(sha256 "$part")"
+  if [ "$got" != "$want" ]; then
+    rm -f "$part"
+    fail "the downloaded $name.tar.gz doesn't match the checksum this plugin ships with, so it wasn't installed"
+  fi
+  tmp="$(mktemp -d "$data/.install.XXXXXX")" || fail "can't create a folder in $data"
+  tar -xzf "$part" -C "$tmp" "$name/consequenced" || fail "couldn't unpack consequenced"
+  chmod 0755 "$tmp/$name/consequenced" && mv -f "$tmp/$name/consequenced" "$bin" ||
+    fail "couldn't install consequenced into $data/$VERSION"
+  rm -rf "$tmp" "$part" "$lock"
+  trap - EXIT TERM INT HUP
+}
+
+case "$mode" in
+  setup | hook) ;;
+  *) fail "unknown command $mode: use setup or hook" ;;
+esac
+
+if [ -n "${CONSEQUENCEOS_BIN:-}" ]; then
+  bin="$CONSEQUENCEOS_BIN"
+  [ -x "$bin" ] || fail "CONSEQUENCEOS_BIN is $bin, which isn't a program"
+else
+  bin="$data/$VERSION/consequenced"
+  [ -x "$bin" ] || install
+fi
+
+# The starter policy, the first time. Its output goes to stderr: on stdout,
+# Claude Code would read it as the hook's answer.
+if [ ! -e "$policy" ]; then
+  "$bin" -init claude-code -policy-only -config "$policy" >&2 ||
+    fail "couldn't write the starter policy to $policy"
+fi
+
+if [ "$mode" = setup ]; then
+  exit 0
+fi
+exec "$bin" -hook claude-code -config "$policy"

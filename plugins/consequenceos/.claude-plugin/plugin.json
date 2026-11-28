@@ -1,0 +1,14 @@
+{
+  "name": "consequenceos",
+  "displayName": "ConsequenceOS",
+  "version": "0.6.0",
+  "description": "A policy on every file edit, shell command and MCP call Claude Code makes: allow, ask or block, with secrets out of reach and a tamper-evident log of what the agent did. Runs on your machine, with no server.",
+  "author": {
+    "name": "Matutozi",
+    "url": "https://github.com/Matutozi"
+  },
+  "homepage": "https://github.com/Matutozi/Consequence-OS/blob/main/plugins/consequenceos/README.md",
+  "repository": "https://github.com/Matutozi/Consequence-OS",
+  "license": "Apache-2.0",
+  "keywords": ["security", "policy", "guardrails", "hooks", "audit", "approval"]
+}

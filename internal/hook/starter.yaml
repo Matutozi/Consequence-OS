@@ -43,10 +43,11 @@ tools:
 
 rules:
   # Keep the agent away from the guard: Claude Code's settings, where this
-  # hook is set up, and this policy and its audit log.
+  # hook is set up, its plugins, one of which may be this hook, and this
+  # policy and its audit log.
   - name: guard-the-guard
     tool: "*"
-    when: { arg: file_path, op: like, value: ["*/.claude/settings*.json", "{{CONSEQUENCE_DIR}}/*"] }
+    when: { arg: file_path, op: like, value: ["*/.claude/settings*.json", "*/.claude/plugins/*", "{{CONSEQUENCE_DIR}}/*"] }
     action: deny
 
   - name: no-secrets

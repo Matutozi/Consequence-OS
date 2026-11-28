@@ -66,6 +66,11 @@ cases:
     args: { file_path: /home/you/project/.claude/settings.local.json, old_string: a, new_string: b }
     want: deny
     rule: guard-the-guard
+  - name: so are its plugins, where this hook may live
+    tool: Edit
+    args: { file_path: /home/you/.claude/plugins/cache/consequenceos/consequenceos/0.6.0/hooks/hooks.json, old_string: a, new_string: b }
+    want: deny
+    rule: guard-the-guard
   - name: so is this policy
     tool: Write
     args: { file_path: "{{CONSEQUENCE_DIR}}/{{POLICY_FILE}}", content: "rules: []" }
