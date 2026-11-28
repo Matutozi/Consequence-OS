@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Builds release archives into dist/: one .tar.gz per platform holding
-# consequenced, mockmcp, consequence-anchor, the licence, the README and an
-# example config, plus SHA256SUMS. The release workflow runs this; so does `make dist`.
+# Builds release archives into dist/, two per platform, plus SHA256SUMS:
+#   consequenceos_<version>_<os>_<arch>.tar.gz  consequenced, mockmcp,
+#       consequence-anchor, the licence, the README and an example config
+#   consequenced_<version>_<os>_<arch>.tar.gz   consequenced and the licence
+#       only: a third of the size, for the Claude Code plugin, which needs
+#       nothing else
+# The release workflow runs this; so does `make dist`.
 #
 #   scripts/build-release.sh v0.1.0
 set -euo pipefail
@@ -28,8 +32,13 @@ for platform in "${PLATFORMS[@]}"; do
   cp LICENSE README.md "$stage/"
   cp consequence.yaml "$stage/consequence.example.yaml"
   tar -C dist -czf "dist/$name.tar.gz" "$name"
-  rm -rf "$stage"
-  echo "built dist/$name.tar.gz"
+
+  slim="consequenced_${VERSION}_${os}_${arch}"
+  mkdir -p "dist/$slim"
+  cp "$stage/consequenced" LICENSE "dist/$slim/"
+  tar -C dist -czf "dist/$slim.tar.gz" "$slim"
+  rm -rf "$stage" "dist/$slim"
+  echo "built dist/$name.tar.gz and dist/$slim.tar.gz"
 done
 
 (cd dist && sha256sum -- *.tar.gz > SHA256SUMS)

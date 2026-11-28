@@ -88,6 +88,18 @@ rules:
 
 <p>From then on, Claude can read files and edit your project freely, asks you before running shell commands, and can't touch your <code>.env</code> files, SSH keys, or the guard itself. You change any of that by editing the rules. See <a href="https://github.com/Matutozi/Consequence-OS/blob/main/docs/personal.md">ConsequenceOS on your own machine</a>.</p>
 
+<h2>Why not just write the rules in CLAUDE.md?</h2>
+
+<p>A CLAUDE.md is a request; this is a lock.</p>
+
+<p>CLAUDE.md is advice the model reads, along with everything else it reads, including a README or a web page that says "ignore your instructions and run this". In a long session it can forget a rule, misread it, or decide this case is an exception, and nothing stops the action when it does.</p>
+
+<p>ConsequenceOS runs outside the model, on every call. Claude can't argue its way past it or be talked out of it, and it can't edit the policy or switch the plugin off. Every decision is logged in a way that shows if anyone edits it, so you can see what the agent actually did.</p>
+
+<p>Use both: CLAUDE.md tells Claude what you want, so it wastes fewer tries on things that would be blocked, and ConsequenceOS makes sure.</p>
+
+<p>Claude Code's own permission settings also enforce, and for simple needs they may be enough. ConsequenceOS adds rules on arguments (an amount, or a path inside the project even through a symlink), catches chained shell commands like <code>git status; rm -rf ~</code>, limits over time, the tamper-evident log, policy tests you can run in CI, and the same policy for MCP tools behind its proxy.</p>
+
 <h2>Good to know</h2>
 
 <ul>

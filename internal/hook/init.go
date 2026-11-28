@@ -34,20 +34,45 @@ func TestsPath(policyPath string) string {
 }
 
 // Starter returns the starter policy for a config kept in dir: its state
-// lives in dir/state, and the rules keep the agent out of dir. The hook
-// resolves symlinks in paths before matching, so the rule names dir with
-// its symlinks resolved too.
-func Starter(dir string) string {
+// lives in dir/state, and the rules keep the agent out of dir. claudeDir is
+// Claude Code's config folder when it isn't ~/.claude ($CLAUDE_CONFIG_DIR),
+// or "": the rules then keep the agent out of its settings and plugins too,
+// which the starter's */.claude/ patterns don't reach. The hook resolves
+// symlinks in paths before matching, so the rule names each folder with its
+// symlinks resolved too.
+func Starter(dir, claudeDir string) string {
+	// Inside a single-quoted YAML string, a glob's backslashes are literal.
+	guarded := yamlQuote(globEscape(resolveDir(dir)) + "/*")
+	if claudeDir != "" {
+		c := globEscape(resolveDir(claudeDir))
+		guarded += ", " + yamlQuote(c+"/settings*.json") + ", " + yamlQuote(c+"/plugins/*")
+	}
 	return strings.NewReplacer(
 		"{{STATE_DIR}}", yamlQuote(filepath.Join(dir, "state")),
-		// Inside a single-quoted YAML string, a glob's backslashes are literal.
-		`"{{CONSEQUENCE_DIR}}/*"`, yamlQuote(globEscape(resolveDir(dir))+"/*"),
+		`"{{CONSEQUENCE_DIR}}/*"`, guarded,
 	).Replace(starter)
+}
+
+// ClaudeConfigDir is the Claude Code config folder $CLAUDE_CONFIG_DIR names,
+// made absolute, or "" when it isn't set.
+func ClaudeConfigDir(lookup func(string) (string, bool)) string {
+	d, ok := lookup("CLAUDE_CONFIG_DIR")
+	if !ok || strings.TrimSpace(d) == "" {
+		return ""
+	}
+	if home, ok := lookup("HOME"); ok && (d == "~" || strings.HasPrefix(d, "~/")) {
+		d = filepath.Join(home, strings.TrimPrefix(d, "~"))
+	}
+	if abs, err := filepath.Abs(d); err == nil {
+		d = abs
+	}
+	return filepath.Clean(d)
 }
 
 // InitOptions configures Init.
 type InitOptions struct {
 	ConfigPath   string // where the policy goes; its directory holds the state too
+	ClaudeDir    string // Claude Code's config folder when not ~/.claude; see Starter
 	SettingsPath string // the Claude Code settings file to add the hook to
 	Command      string // the command the hook runs
 	Yes          bool   // add the hook without asking
@@ -61,7 +86,7 @@ type InitOptions struct {
 // were. Saying no is not an error: nothing is written.
 func Init(opts InitOptions) error {
 	out := opts.Out
-	if err := WriteStarter(opts.ConfigPath, out); err != nil {
+	if err := WriteStarter(opts.ConfigPath, opts.ClaudeDir, out); err != nil {
 		return err
 	}
 
@@ -94,8 +119,8 @@ func Init(opts InitOptions) error {
 }
 
 // WriteStarter writes the starter policy, and its tests beside it, unless
-// a policy is there already.
-func WriteStarter(path string, out io.Writer) error {
+// a policy is there already. claudeDir is as for Starter.
+func WriteStarter(path, claudeDir string, out io.Writer) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -108,7 +133,7 @@ func WriteStarter(path string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.WriteString(Starter(dir)); err != nil {
+	if _, err := f.WriteString(Starter(dir, claudeDir)); err != nil {
 		f.Close()
 		return err
 	}

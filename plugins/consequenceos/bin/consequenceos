@@ -2,10 +2,13 @@
 # The ConsequenceOS plugin's hook: a policy on every tool call Claude Code
 # makes, decided by consequenced -hook claude-code.
 #
-#   consequenceos setup   at the start of a session: install consequenced
-#                         and write the starter policy, if they aren't there
-#   consequenceos hook    before each tool call: the same, then the policy
-#                         decides the call
+#   consequenceos setup     at the start of a session: start installing
+#                           consequenced in the background if it isn't
+#                           there, and say what's happening
+#   consequenceos hook      before each tool call: the policy decides it
+#   consequenceos install   download and install consequenced, then write
+#                           the starter policy; setup and hook run this in
+#                           the background, and it can be run by hand
 #
 # consequenced is the release VERSION names, downloaded once into the
 # plugin's data folder. The download must match SHA256SUMS beside this
@@ -13,25 +16,54 @@
 # the plugin was published never runs. CONSEQUENCEOS_BIN runs another
 # consequenced instead, such as one built from source.
 #
-# It fails closed: if consequenced can't be installed, or the policy can't
-# be written, the hook exits 2 and Claude Code blocks the call.
+# The download runs in the background, so starting a session never waits
+# for it and a tool call never times out on it. Until it's done, each tool
+# call is blocked straight away, with a message saying why. That is the
+# plugin failing closed: if consequenced can't decide a call, it doesn't run.
 set -uo pipefail
 
 VERSION=v0.6.0
 REPO=https://github.com/Matutozi/Consequence-OS
 
 mode="${1:-hook}"
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+self="${BASH_SOURCE[0]}"
+root="$(cd "$(dirname "$self")/.." && pwd)"
 data="${CLAUDE_PLUGIN_DATA:-$HOME/.consequence/plugin}"
 policy="${CONSEQUENCEOS_POLICY:-$HOME/.consequence/claude-code.yaml}"
+lock="$data/.install.lock"   # held by the install that's running; holds its PID
+errors="$data/install.error" # why the last install failed
+welcome="$data/welcome"      # the note for the person, once the starter policy is written
+
+# json STRING: STRING as a JSON string.
+json() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\t'/ }"
+  printf '"%s"' "$s"
+}
+
+# tell MESSAGE: shows MESSAGE to the person in Claude Code (setup only: a
+# hook's stdout is its answer).
+tell() { printf '{"systemMessage":%s}\n' "$(json "$1")"; }
 
 fail() {
-  if [ "$mode" = hook ]; then
-    echo "ConsequenceOS blocked this call: $*" >&2
-    exit 2
-  fi
-  echo "ConsequenceOS isn't ready, so it will block every tool call: $*" >&2
-  exit 1
+  case "$mode" in
+    hook)
+      echo "ConsequenceOS blocked this call: $*" >&2
+      exit 2
+      ;;
+    install)
+      printf '%s\n' "$*" >"$errors.tmp" && mv -f "$errors.tmp" "$errors"
+      echo "$(date '+%F %T') $*" >&2
+      exit 1
+      ;;
+    *)
+      tell "ConsequenceOS isn't ready, so it blocks Claude's tool calls: $*"
+      exit 0
+      ;;
+  esac
 }
 
 sha256() {
@@ -42,13 +74,11 @@ sha256() {
   fi
 }
 
-# install downloads consequenced VERSION for this machine into $bin, after
-# checking the archive against the plugin's SHA256SUMS. On a slow link the
-# download can outlast a hook's timeout, so it resumes: what arrived stays
-# in a .part file, and the next run carries on from there. A lock keeps
-# calls made at the same time from writing to that file together.
-install() {
-  local os arch name want got tmp url protos part lock
+# release finds the archive to download for this machine and its checksum:
+# the one with consequenced alone where the release has it (v0.7.0 on),
+# otherwise the full one. Sets name and want.
+release() {
+  local os arch
   case "$(uname -s)" in
     Linux) os=linux ;;
     Darwin) os=darwin ;;
@@ -59,24 +89,82 @@ install() {
     arm64 | aarch64) arch=arm64 ;;
     *) fail "there's no consequenced build for $(uname -m)" ;;
   esac
-  name="consequenceos_${VERSION}_${os}_${arch}"
-  want="$(awk -v f="$name.tar.gz" '$2 == f { print $1 }' "$root/SHA256SUMS" 2>/dev/null)"
-  [ -n "$want" ] || fail "this plugin has no checksum for $name.tar.gz, so it can't install consequenced. Install consequenced yourself and set CONSEQUENCEOS_BIN to its path"
-  command -v curl >/dev/null 2>&1 || fail "curl is needed to install consequenced"
+  for name in "consequenced_${VERSION}_${os}_${arch}" "consequenceos_${VERSION}_${os}_${arch}"; do
+    want="$(awk -v f="$name.tar.gz" '$2 == f { print $1 }' "$root/SHA256SUMS" 2>/dev/null)"
+    [ -n "$want" ] && return 0
+  done
+  fail "this plugin has no checksum for consequenced $VERSION on ${os}_${arch}, so it can't install it. Install consequenced yourself and set CONSEQUENCEOS_BIN to its path"
+}
 
-  mkdir -p "$data/$VERSION" || fail "can't create $data/$VERSION"
-  lock="$data/.install.lock"
-  if ! mkdir "$lock" 2>/dev/null; then
-    # A lock left by a run that was killed outright is cleared after 10 minutes.
-    if [ -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ] && rm -rf "$lock" && mkdir "$lock" 2>/dev/null; then
-      :
-    else
-      fail "consequenced $VERSION is still being downloaded; try again in a minute"
-    fi
+# installing reports whether an install is running. A lock whose process
+# is gone, left by an install that was killed, is cleared.
+installing() {
+  local pid
+  [ -d "$lock" ] || return 1
+  pid="$(cat "$lock/pid" 2>/dev/null)"
+  if [ -n "$pid" ]; then
+    kill -0 "$pid" 2>/dev/null && return 0
+  elif [ -z "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+    return 0 # just taken; its PID is on the way
   fi
-  tmp=""
+  rm -rf "$lock"
+  return 1
+}
+
+# background starts consequenceos install on its own, outside Claude
+# Code's process group and with its own output, so neither the session nor
+# a hook waits for it, and it survives the hook that started it.
+background() {
+  mkdir -p "$data" || fail "can't create $data"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash "$self" install </dev/null >>"$data/install.log" 2>&1 &
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' bash "$self" install </dev/null >>"$data/install.log" 2>&1 &
+  else
+    nohup bash "$self" install </dev/null >>"$data/install.log" 2>&1 &
+  fi
+}
+
+# progress says how far a download has got.
+progress() {
+  local part="$data/$name.tar.gz.part" bytes
+  [ -f "$part" ] || return 0
+  bytes="$(wc -c <"$part" | tr -d ' ')"
+  awk -v b="$bytes" 'BEGIN { printf " (%.1f MB downloaded so far)", b / 1048576 }'
+}
+
+# write_policy writes the starter policy the first time, and leaves the
+# person a note about it. Its output goes to stderr: on stdout, Claude
+# Code would read it as the hook's answer.
+write_policy() {
+  [ -e "$policy" ] && return 0
+  "$bin" -init claude-code -policy-only -config "$policy" >&2 ||
+    fail "couldn't write the starter policy to $policy"
+  printf '%s' "ConsequenceOS is on. It wrote a starter policy to $policy: reads, and edits inside the project, go ahead; other shell commands ask you first; secrets, Claude Code's settings and plugins, and the policy itself are off limits. To change the rules, edit that file. Claude can't." >"$welcome"
+}
+
+# take_welcome prints the note about the starter policy, once.
+take_welcome() {
+  local mine="$welcome.$$"
+  [ -f "$welcome" ] && mv "$welcome" "$mine" 2>/dev/null || return 1
+  cat "$mine"
+  rm -f "$mine"
+}
+
+# install downloads consequenced into $bin, checked against the plugin's
+# SHA256SUMS, then writes the starter policy. On a slow link a download can
+# be cut off, so it resumes: what arrived stays in a .part file, and the
+# next install carries on from there.
+install() {
+  local got tmp="" url protos part
+  release
+  command -v curl >/dev/null 2>&1 || fail "curl is needed to install consequenced"
+  mkdir -p "$data/$VERSION" || fail "can't create $data/$VERSION"
+  mkdir "$lock" 2>/dev/null || exit 0 # another install is running
+  echo $$ >"$lock/pid"
   trap 'rm -rf "$lock" ${tmp:+"$tmp"}' EXIT
   trap 'exit 143' TERM INT HUP
+  rm -f "$errors"
 
   part="$data/$name.tar.gz.part"
   if [ ! -f "$part" ] || [ "$(sha256 "$part")" != "$want" ]; then
@@ -87,8 +175,11 @@ install() {
       url="$CONSEQUENCEOS_DOWNLOAD_URL"
       protos='=https,file'
     fi
-    curl -fsSL --proto "$protos" --tlsv1.2 --retry 2 -C - -o "$part" "$url/$name.tar.gz" ||
-      fail "couldn't download consequenced $VERSION from $url; the next call carries on where this one stopped"
+    # A download that stalls (under 1 KB/s for a minute) gives up, so the
+    # next try can start; it keeps what arrived.
+    curl -fsSL --proto "$protos" --tlsv1.2 --retry 2 --speed-limit 1024 --speed-time 60 \
+      -C - -o "$part" "$url/$name.tar.gz" ||
+      fail "couldn't download consequenced $VERSION from $url; the next try carries on where this one stopped"
   fi
   got="$(sha256 "$part")"
   if [ "$got" != "$want" ]; then
@@ -99,13 +190,15 @@ install() {
   tar -xzf "$part" -C "$tmp" "$name/consequenced" || fail "couldn't unpack consequenced"
   chmod 0755 "$tmp/$name/consequenced" && mv -f "$tmp/$name/consequenced" "$bin" ||
     fail "couldn't install consequenced into $data/$VERSION"
-  rm -rf "$tmp" "$part" "$lock"
+  rm -rf "$tmp" "$part"
+  write_policy
+  rm -rf "$lock"
   trap - EXIT TERM INT HUP
 }
 
 case "$mode" in
-  setup | hook) ;;
-  *) fail "unknown command $mode: use setup or hook" ;;
+  setup | hook | install) ;;
+  *) fail "unknown command $mode: use setup, hook or install" ;;
 esac
 
 if [ -n "${CONSEQUENCEOS_BIN:-}" ]; then
@@ -113,17 +206,54 @@ if [ -n "${CONSEQUENCEOS_BIN:-}" ]; then
   [ -x "$bin" ] || fail "CONSEQUENCEOS_BIN is $bin, which isn't a program"
 else
   bin="$data/$VERSION/consequenced"
-  [ -x "$bin" ] || install
 fi
 
-# The starter policy, the first time. Its output goes to stderr: on stdout,
-# Claude Code would read it as the hook's answer.
-if [ ! -e "$policy" ]; then
-  "$bin" -init claude-code -policy-only -config "$policy" >&2 ||
-    fail "couldn't write the starter policy to $policy"
+if [ "$mode" = install ]; then
+  if [ -x "$bin" ]; then write_policy; else install; fi
+  exit 0
 fi
+
+# Not installed yet: start installing in the background, if nothing is, and
+# say so. A tool call is blocked straight away rather than waiting.
+if [ ! -x "$bin" ]; then
+  release
+  last=""
+  if ! installing; then
+    [ -s "$errors" ] && last=" The last try failed: $(cat "$errors")"
+    background
+  fi
+  if [ "$mode" = setup ]; then
+    tell "ConsequenceOS is downloading consequenced $VERSION (about 6 MB) in the background. Until it's done, it blocks Claude's tool calls; on a slow connection that can take a few minutes.$last"
+    exit 0
+  fi
+  fail "ConsequenceOS is still installing consequenced $VERSION in the background$(progress), so this call waits until it's done. Try again in a minute.$last"
+fi
+
+# Installed. The starter policy, the first time, if the install didn't
+# write it (consequenced came from CONSEQUENCEOS_BIN, or the policy was
+# deleted).
+write_policy
 
 if [ "$mode" = setup ]; then
+  if note="$(take_welcome)"; then tell "$note"; fi
+  exit 0
+fi
+
+# The note about the starter policy goes with this call's answer, once.
+if note="$(take_welcome)"; then
+  answer="$("$bin" -hook claude-code -config "$policy")"
+  code=$?
+  if [ "$code" != 0 ]; then
+    printf '%s' "$note" >"$welcome" # not shown; the next call tries again
+    [ -n "$answer" ] && printf '%s\n' "$answer"
+    exit "$code"
+  fi
+  if [ -z "$answer" ]; then
+    tell "$note"
+  else
+    # consequenced answers with one JSON object; the note joins it.
+    printf '{"systemMessage":%s,%s\n' "$(json "$note")" "${answer#\{}"
+  fi
   exit 0
 fi
 exec "$bin" -hook claude-code -config "$policy"

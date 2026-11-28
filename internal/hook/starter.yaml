@@ -44,7 +44,9 @@ tools:
 rules:
   # Keep the agent away from the guard: Claude Code's settings, where this
   # hook is set up, its plugins, one of which may be this hook, and this
-  # policy and its audit log.
+  # policy and its audit log. When Claude Code keeps its config somewhere
+  # other than ~/.claude ($CLAUDE_CONFIG_DIR), that folder's settings and
+  # plugins are named here too.
   - name: guard-the-guard
     tool: "*"
     when: { arg: file_path, op: like, value: ["*/.claude/settings*.json", "*/.claude/plugins/*", "{{CONSEQUENCE_DIR}}/*"] }
