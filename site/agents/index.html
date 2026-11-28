@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent cards · ConsequenceOS</title>
+<style>
+  body {
+    max-width: 680px; margin: 0 auto; padding: 40px 20px 80px;
+    font: 18px/1.6 Charter, "Bitstream Charter", Georgia, serif;
+    color: #222; background: #fffefb;
+  }
+  a { color: #0645ad; }
+  a:visited { color: #5a3e9a; }
+  h1 { font-size: 1.6em; margin: 0 0 4px; }
+  p, ul { margin: 0 0 14px; }
+  .nav { font-size: 0.9em; color: #666; margin-bottom: 32px; }
+  code { font: 14px/1.5 ui-monospace, Menlo, Consolas, monospace; background: #f4f2ec; padding: 0 3px; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #ddd; background: #161616; }
+    a { color: #8ab4f8; } a:visited { color: #c58af9; }
+    code { background: #232323; }
+    .nav { color: #999; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Agent cards</h1>
+<div class="nav"><a href="/">ConsequenceOS</a></div>
+
+<p>Agents registered in Concordium's Agent Registry with ConsequenceOS as their guard. The registry pins each card's URL and SHA-256, so these files are served exactly as <code>consequence-anchor card</code> wrote them.</p>
+
+<ul>
+  <li><a href="/agents/refund-bot.json">refund-bot.json</a>: the demo refund bot, on testnet.</li>
+</ul>
+
+<p>To check one from the chain: <code>consequence-anchor verify -token ID</code>. See <a href="https://github.com/Matutozi/Consequence-OS/blob/main/docs/concordium.md">Anchoring on Concordium</a>.</p>
+
+</body>
+</html>

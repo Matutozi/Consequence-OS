@@ -1,0 +1,32 @@
+# consequence.yaml with rules on the arguments in place of a context
+# score: the comparison cmd/shadow-score was asked to make. Run it with
+# -config examples/shadow-score/consequence.arg-rules.yaml.
+
+default_allow_below: 20
+
+tools:
+  crm.get_contact: read
+  crm.export_contacts: read
+  crm.delete_contacts: reversible
+  email.send: irreversible
+
+rules:
+  - name: no-wipe-all
+    tool: crm.delete_contacts
+    when: { arg: all, op: eq, value: true }
+    action: deny
+  - name: exports-leave-only-with-a-human
+    tool: crm.export_contacts
+    when: { arg: to, op: not_like, value: "*@acme.com", fold: true }
+    action: ask
+  - name: email-teammates
+    tool: email.send
+    when: { arg: "to.*", op: like, value: "*@acme.com", fold: true }
+    action: allow
+  - name: high-consequence-asks
+    tool: "*"
+    consequence: { arg: score, op: gte, value: 70 }
+    action: ask
+  - name: support-deletes-contacts
+    tool: crm.delete_contacts
+    action: allow

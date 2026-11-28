@@ -18,7 +18,7 @@ export CONSEQUENCE_SIGNING_KEY_MLDSA87 ?= d981o8Ahw7SPWkniT-C-PSaH-CDeOSX9aZCCf4
 # and drop throwaway databases.
 TEST_DATABASE_URL ?= postgres://postgres:test@127.0.0.1:55432/postgres
 
-.PHONY: run check mock demo demo-approval demo-receipts demo-personal demo-rug-pull demo-concordium test test-policy test-plugin test-postgres bench lint dist env up down logs
+.PHONY: run check mock demo demo-approval demo-receipts demo-personal demo-rug-pull demo-concordium test test-policy test-plugin test-postgres shadow-score bench lint dist env up down logs
 
 run:
 	go run ./cmd/consequenced -config $(CONFIG)
@@ -70,6 +70,11 @@ test-policy:
 # policy, calls through the hook, and the ways it must fail closed.
 test-plugin:
 	scripts/test-plugin.sh
+
+# The shadow-score experiment: the same cases decided on today's score and
+# on a context score. Nothing it computes reaches the gate.
+shadow-score:
+	go run ./cmd/shadow-score -cases examples/shadow-score/cases.yaml -spec examples/shadow-score/spec.yaml
 
 test-postgres:
 	CONSEQUENCE_TEST_DATABASE_URL=$(TEST_DATABASE_URL) go test ./internal/store/
