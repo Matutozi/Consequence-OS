@@ -9,6 +9,11 @@
 #   consequenceos install   download and install consequenced, then write
 #                           the starter policy; setup and hook run this in
 #                           the background, and it can be run by hand
+#   consequenceos check     print the policy's rules and warnings, and run
+#                           its tests (/consequenceos:check)
+#   consequenceos try       check rules given on stdin, in the "Your rules"
+#                           section of a copy of the policy; the policy
+#                           itself isn't changed (/consequenceos:add-rule)
 #
 # consequenced is the release VERSION names, downloaded once into the
 # plugin's data folder. The download must match SHA256SUMS beside this
@@ -57,6 +62,10 @@ fail() {
     install)
       printf '%s\n' "$*" >"$errors.tmp" && mv -f "$errors.tmp" "$errors"
       echo "$(date '+%F %T') $*" >&2
+      exit 1
+      ;;
+    check | try)
+      echo "ConsequenceOS: $*" >&2
       exit 1
       ;;
     *)
@@ -197,8 +206,8 @@ install() {
 }
 
 case "$mode" in
-  setup | hook | install) ;;
-  *) fail "unknown command $mode: use setup, hook or install" ;;
+  setup | hook | install | check | try) ;;
+  *) fail "unknown command $mode: use setup, hook, install, check or try" ;;
 esac
 
 if [ -n "${CONSEQUENCEOS_BIN:-}" ]; then
@@ -211,6 +220,42 @@ fi
 if [ "$mode" = install ]; then
   if [ -x "$bin" ]; then write_policy; else install; fi
   exit 0
+fi
+
+if [ "$mode" = check ] || [ "$mode" = try ]; then
+  [ -x "$bin" ] || fail "consequenced isn't installed yet; it's downloading in the background, so try again in a minute"
+  [ -e "$policy" ] || fail "there's no policy at $policy yet"
+fi
+
+if [ "$mode" = check ]; then
+  "$bin" -hook claude-code -check -config "$policy" || exit 1
+  tests="${policy%.*}.test.yaml"
+  [ -f "$tests" ] || exit 0
+  echo
+  exec "$bin" -test "$tests"
+fi
+
+# try puts the rules on stdin where the person would paste them, just
+# above the "End of your rules" line, in a copy of the policy, and checks
+# that copy. Rules written at the left margin are indented to fit.
+if [ "$mode" = try ]; then
+  end="  # ---- End of your rules ----"
+  grep -qxF "$end" "$policy" ||
+    fail "$policy has no '# ---- End of your rules ----' line (policies written before v0.7.0 don't). Put the rule above the first rule it should come before, then run check"
+  mkdir -p "$data" || fail "can't create $data"
+  rules="$(mktemp "$data/try-rules.XXXXXX")" && copy="$(mktemp "$data/try-policy.XXXXXX")" ||
+    fail "can't create a file in $data"
+  trap 'rm -f "$rules" "$copy"' EXIT
+  cat >"$rules"
+  first="$(sed -n '/[^[:space:]]/{p;q;}' "$rules")"
+  [ -n "$first" ] || fail "give the rules to try on stdin"
+  case "$first" in
+    -*) sed -i.bak 's/^/  /' "$rules" && rm -f "$rules.bak" ;;
+  esac
+  awk -v end="$end" -v f="$rules" '$0 == end { while ((getline line < f) > 0) print line } { print }' "$policy" >"$copy"
+  echo "Your policy with these rules added, as it would be checked:"
+  "$bin" -hook claude-code -check -config "$copy"
+  exit $?
 fi
 
 # Not installed yet: start installing in the background, if nothing is, and
