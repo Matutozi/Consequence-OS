@@ -113,6 +113,36 @@ else
   fail "note with an ask: code $code, $out"
 fi
 
+# check prints the rules and runs the policy's tests.
+pol="$HOME/.consequence/claude-code.yaml"
+check_out="$(bash "$launcher" check 2>&1)" && [[ "$check_out" == *"guard-the-guard"*"ok: "*cases* ]] &&
+  pass "check lists the rules and runs their tests" || fail "check: $check_out"
+
+# try checks a rule in a copy of the policy, in the "Your rules" section,
+# and leaves the policy as it was.
+before="$(sha256 "$pol")"
+try_out="$(bash "$launcher" try 2>&1 <<'EOF'
+- name: tests
+  tool: Bash
+  when:
+    - { arg: command, op: like, value: ["go test ./..."] }
+    - { arg: compound, op: eq, value: false }
+  action: allow
+EOF
+)" && try_code=0 || try_code=$?
+if [ "$try_code" = 0 ] && [[ "$try_out" == *"tests: Bash -> allow"* ]] && [ "$(sha256 "$pol")" = "$before" ] &&
+  [ "$(grep -n -m1 'tests: Bash' <<<"$try_out" | cut -d: -f1)" -lt "$(grep -n -m1 ' edits-in-the-project' <<<"$try_out" | cut -d: -f1)" ]; then
+  pass "try checks a rule in the 'Your rules' place, before the defaults, and leaves the policy alone"
+else
+  fail "try: code $try_code, $try_out"
+fi
+bad_out="$(printf -- '- name: oops\n  tool: Bash\n  when: { arg: command, op: resembles, value: x }\n  action: allow\n' | bash "$launcher" try 2>&1)" && bad_code=0 || bad_code=$?
+[ "$bad_code" != 0 ] && [ "$(sha256 "$pol")" = "$before" ] && pass "try refuses a rule that doesn't check" || fail "try with a bad rule: code $bad_code, $bad_out"
+grep -v -- '---- End of your rules ----' "$pol" >"$work/old-policy.yaml"
+old_out="$(CONSEQUENCEOS_POLICY="$work/old-policy.yaml" bash "$launcher" try </dev/null 2>&1)" && old_code=0 || old_code=$?
+[ "$old_code" != 0 ] && [[ "$old_out" == *"End of your rules"* ]] && pass "try says what to do with a policy from before the 'Your rules' section" ||
+  fail "try on an old policy: code $old_code, $old_out"
+
 # The policy is the user's from now on: a later run keeps it.
 echo "# mine" >>"$HOME/.consequence/claude-code.yaml"
 bash "$launcher" setup >/dev/null

@@ -75,6 +75,23 @@ rules:
     when: { arg: message, op: like, value: ["*password*", "*passphrase*", "*passcode*", "*api key*", "*secret key*", "*private key*", "*seed phrase*", "*recovery phrase*"], fold: true }
     action: deny
 
+  # ---- Your rules ----
+  # Add your own rules between these two lines. They come after the rules
+  # above, which keep secrets and the guard safe, and before the defaults
+  # below, so the first one that matches a call decides it. For example,
+  # to run the tests without being asked:
+  #
+  #   - name: tests
+  #     tool: Bash
+  #     when:
+  #       - { arg: command, op: like, value: ["go test ./...", "npm test"] }
+  #       - { arg: compound, op: eq, value: false }
+  #     action: allow
+  #
+  # In Claude Code, /consequenceos:add-rule drafts a rule from plain words,
+  # and /consequenceos:check checks the rules after you change them.
+  # ---- End of your rules ----
+
   # Changes to files in the project go ahead (Claude Code may still ask, by
   # its own settings). Anywhere else, they ask.
   - name: edits-in-the-project

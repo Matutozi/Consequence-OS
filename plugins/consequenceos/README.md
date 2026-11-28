@@ -43,13 +43,18 @@ ConsequenceOS only ever makes Claude Code stricter: a call it allows still goes 
 
 ## Changing the rules
 
-Edit `~/.consequence/claude-code.yaml`. Rules are checked top to bottom and the first match wins. [ConsequenceOS on your own machine](../../docs/personal.md#changing-the-rules) has examples, and [Guarding Claude Code](../../docs/claude-code.md) is the full reference.
+Your rules live in `~/.consequence/claude-code.yaml`. Rules are checked top to bottom, and the first one that matches a call decides it. Put yours between the `# ---- Your rules ----` and `# ---- End of your rules ----` lines: after the rules that keep secrets and the guard safe, and before the defaults.
 
-To check a change, see the log or run the policy's tests, install `consequenced` on your `PATH` too ([releases](https://github.com/Matutozi/Consequence-OS/releases), or `go install github.com/matutozi/consequence-os/cmd/consequenced@latest`):
+Two commands help, in Claude Code:
+
+- **`/consequenceos:add-rule <what you want, in plain words>`** drafts a rule, checks it in a copy of your policy, and shows you where to paste it. For example: `/consequenceos:add-rule ask before editing anything in migrations/`.
+- **`/consequenceos:check`** lists your rules in the order they're checked, warns about risky ones, and runs the policy's tests.
+
+Claude can read your policy but can't change it, so you paste the rule in yourself. Each command runs one shell command, which ConsequenceOS asks you to approve like any other. [ConsequenceOS on your own machine](../../docs/personal.md#changing-the-rules) has more examples, and [Guarding Claude Code](../../docs/claude-code.md) is the full reference.
+
+To see the log, install `consequenced` on your `PATH` too ([releases](https://github.com/Matutozi/Consequence-OS/releases), or `go install github.com/matutozi/consequence-os/cmd/consequenced@latest`):
 
 ```bash
-consequenced -hook claude-code -check                       # the rules, and warnings about risky ones
-consequenced -test ~/.consequence/claude-code.test.yaml     # the policy's tests
 consequenced -hook claude-code -log                         # the last 20 decisions
 consequenced -hook claude-code -verify-audit                # check nobody edited the log
 ```
@@ -67,5 +72,6 @@ These environment variables, set where you start Claude Code, change what the pl
 
 - **Set up with `consequenced -init claude-code` before?** Remove that hook entry from `.claude/settings.local.json` or `~/.claude/settings.json`, or every call is checked twice. Your policy stays where it is, and the plugin uses it.
 - **Claude Code's config somewhere else?** With `CLAUDE_CONFIG_DIR` set, the starter policy also blocks changes to that folder's settings and plugins. A policy written before v0.7.0 doesn't have that: delete `~/.consequence/claude-code.yaml` (and `claude-code.test.yaml`) to get the new starter, or add the folder to the `guard-the-guard` rule yourself.
+- **Permission modes.** A deny holds in every mode. In checks with `manual` and `auto` mode, a call the policy asks about wasn't run until approved. Other modes weren't tested.
 - **It isn't a sandbox.** Claude Code runs the hook, not the operating system. It stops the calls Claude Code makes through its tools. See [what it doesn't cover](../../docs/claude-code.md#what-this-doesnt-cover).
 - **Uninstalling** with `/plugin uninstall consequenceos` removes the hook. Your policy and log stay in `~/.consequence`.
