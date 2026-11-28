@@ -27,7 +27,7 @@
 # plugin failing closed: if consequenced can't decide a call, it doesn't run.
 set -uo pipefail
 
-VERSION=v0.6.0
+VERSION=v0.7.0
 REPO=https://github.com/Matutozi/Consequence-OS
 
 mode="${1:-hook}"
@@ -271,7 +271,7 @@ if [ ! -x "$bin" ]; then
     tell "ConsequenceOS is downloading consequenced $VERSION (about 6 MB) in the background. Until it's done, it blocks Claude's tool calls; on a slow connection that can take a few minutes.$last"
     exit 0
   fi
-  fail "ConsequenceOS is still installing consequenced $VERSION in the background$(progress), so this call waits until it's done. Try again in a minute.$last"
+  fail "it's still installing consequenced $VERSION in the background$(progress), and blocks every call until that's done. Try again in a minute.$last"
 fi
 
 # Installed. The starter policy, the first time, if the install didn't
