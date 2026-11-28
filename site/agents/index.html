@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Cards · ConsequenceOS</title>
+<meta name="description" content="Agent Cards of the agents registered in Concordium's Agent Registry from ConsequenceOS.">
+<style>
+  :root { --bg: #fbfbf9; --fg: #1b1f27; --muted: #5a6170; --line: #e3e4e0; --card: #fff; --code: #f2f3ef; --accent: #1f7a55; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #10141d; --fg: #e7e9ee; --muted: #a0a7b5; --line: #262d3b; --card: #161c28; --code: #1b2230; --accent: #7dd3a8; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 48px 22px 64px; }
+  a { color: var(--accent); text-underline-offset: 3px; }
+  h1 { font-size: 1.8rem; margin: 0 0 12px; }
+  p { margin: 0 0 14px; }
+  .muted { color: var(--muted); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.86em; background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  ul { padding: 0; list-style: none; }
+  li { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+  li span { display: block; color: var(--muted); font-size: 0.93rem; }
+</style>
+</head>
+<body>
+<main>
+  <p><a href="/">← ConsequenceOS</a></p>
+  <h1>Agent Cards</h1>
+  <p class="muted">Each file here is the Agent Card of an agent registered in Concordium's Agent Registry and guarded by ConsequenceOS. The registry pins each card's URL and SHA-256, so the files are hosted exactly as <code>consequence-anchor card</code> wrote them. To check an agent from the chain, run <code>consequence-anchor verify -token ID</code>.</p>
+  <ul>
+    <li>
+      <a href="/agents/refund-bot.json">refund-bot.json</a>
+      <span>Refund bot, the ConsequenceOS demo agent on Concordium testnet.</span>
+    </li>
+  </ul>
+</main>
+</body>
+</html>

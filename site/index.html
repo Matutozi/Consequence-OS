@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ConsequenceOS: no receipt, no action</title>
+<meta name="description" content="A policy gate between AI agents and the tools they call. Every call is allowed, held for a person, or blocked, and every call let through carries a signed receipt the receiving service can check.">
+<meta property="og:title" content="ConsequenceOS: no receipt, no action">
+<meta property="og:description" content="A policy gate between AI agents and the tools they call, with signed receipts the receiving service can check.">
+<meta property="og:url" content="https://consequenceos.emmanelsobowale.dev/">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141b2d'/%3E%3Cpath d='M9 16.5l4.5 4.5L23 11.5' fill='none' stroke='%237dd3a8' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #fbfbf9; --fg: #1b1f27; --muted: #5a6170; --line: #e3e4e0;
+    --card: #ffffff; --code: #f2f3ef; --accent: #1f7a55; --accent-soft: #e4f3ec;
+    --deny: #b3402f; --ask: #9a6a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #10141d; --fg: #e7e9ee; --muted: #a0a7b5; --line: #262d3b;
+      --card: #161c28; --code: #1b2230; --accent: #7dd3a8; --accent-soft: #1a2b26;
+      --deny: #f08a78; --ask: #e6b84e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 56px 22px 72px; }
+  a { color: var(--accent); text-underline-offset: 3px; }
+  h1 { font-size: 2.4rem; line-height: 1.15; margin: 0 0 14px; letter-spacing: -0.02em; }
+  h2 { font-size: 1.3rem; margin: 56px 0 12px; letter-spacing: -0.01em; }
+  h3 { font-size: 1.02rem; margin: 0 0 6px; }
+  p { margin: 0 0 14px; }
+  .kicker { color: var(--accent); font-weight: 600; font-size: 0.9rem; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 10px; }
+  .lede { font-size: 1.15rem; color: var(--muted); max-width: 640px; }
+  .links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+  .button {
+    display: inline-block; padding: 9px 16px; border-radius: 8px; font-weight: 600; font-size: 0.95rem;
+    text-decoration: none; border: 1px solid var(--line); color: var(--fg); background: var(--card);
+  }
+  .button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.86em; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  pre {
+    background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; line-height: 1.5; margin: 0 0 16px;
+  }
+  pre code { background: none; padding: 0; font-size: 1em; }
+  .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 10px; align-items: stretch; margin: 26px 0 8px; }
+  .step { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .step.gate { border-color: var(--accent); background: var(--accent-soft); }
+  .step strong { display: block; margin-bottom: 4px; }
+  .step span { color: var(--muted); font-size: 0.88rem; line-height: 1.45; display: block; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .decisions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  .pill { font-size: 0.78rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
+  .allow { color: var(--accent); } .ask { color: var(--ask); } .deny { color: var(--deny); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .tile p { color: var(--muted); font-size: 0.93rem; margin: 0; }
+  .tier { color: var(--accent); font-size: 0.78rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+  ul.plain { padding-left: 20px; margin: 0 0 14px; }
+  ul.plain li { margin-bottom: 6px; }
+  .note { color: var(--muted); font-size: 0.92rem; }
+  footer { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+  @media (max-width: 640px) {
+    h1 { font-size: 1.9rem; }
+    .flow { grid-template-columns: 1fr; }
+    .arrow { transform: rotate(90deg); justify-self: center; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="kicker">Open source · Apache-2.0</div>
+  <h1>No receipt, no action.</h1>
+  <p class="lede">ConsequenceOS sits between an AI agent and the tools it calls. It checks every call against your policy, holds risky ones for a person, and gives every call it lets through a signed receipt that the service on the other end can check.</p>
+  <div class="links">
+    <a class="button primary" href="https://github.com/Matutozi/Consequence-OS">GitHub</a>
+    <a class="button" href="https://github.com/Matutozi/Consequence-OS/blob/main/docs/personal.md">Guard Claude Code</a>
+    <a class="button" href="https://github.com/Matutozi/Consequence-OS/releases">Releases</a>
+  </div>
+
+  <div class="flow" aria-label="How a call flows">
+    <div class="step"><strong>Agent</strong><span>Calls a tool: a refund, a shell command, a database write.</span></div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="step gate">
+      <strong>ConsequenceOS</strong>
+      <span>Checks the policy, asks a person when it should, logs the decision.</span>
+      <div class="decisions"><span class="pill allow">allow</span><span class="pill ask">ask</span><span class="pill deny">deny</span></div>
+    </div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="step"><strong>Your service</strong><span>Acts only on a call with a valid receipt. No receipt, it refuses.</span></div>
+  </div>
+
+  <h2>Why receipts</h2>
+  <p>Approval gateways already hold calls for a person, but the service that finally acts never sees that approval. It has to trust whatever reached it. A ConsequenceOS receipt is proof it can check: which rule, or which named person, allowed exactly this call, with these arguments, once, in the last five minutes.</p>
+  <p>Receipts are signed twice, with Ed25519 and the post-quantum ML-DSA-87, and both signatures must hold. Every decision goes into a hash-chained audit log the agent can't touch, which shows any edit, and which can be anchored on a public chain.</p>
+
+  <h2>Three ways in</h2>
+  <div class="grid">
+    <div class="tile">
+      <div class="tier">No integration</div>
+      <h3>A hook on your coding agent</h3>
+      <p>Every file edit and shell command Claude Code makes goes through the policy. Secrets stay out of reach, and the agent can't switch the guard off. No server, no database.</p>
+    </div>
+    <div class="tile">
+      <div class="tier">Config only</div>
+      <h3>A proxy in front of any MCP server</h3>
+      <p>ConsequenceOS holds the upstream token, so the agent can't go around it. The system behind it doesn't change.</p>
+    </div>
+    <div class="tile">
+      <div class="tier">Full</div>
+      <h3>Receivers that check receipts</h3>
+      <p>Middleware in Go or Python refuses any call without a valid receipt for that exact call. The strongest guarantee, and always optional.</p>
+    </div>
+  </div>
+
+  <h2>Try it on Claude Code</h2>
+  <p>As a Claude Code plugin, from the repository's own marketplace:</p>
+<pre><code>/plugin install consequenceos --marketplace Matutozi/Consequence-OS</code></pre>
+  <p>Or install <code>consequenced</code> yourself and set up the hook in a project:</p>
+<pre><code>go install github.com/matutozi/consequence-os/cmd/consequenced@latest
+cd ~/code/my-project
+consequenced -init claude-code</code></pre>
+  <p class="note">Linux and macOS. The starter policy lets reads and in-project edits through, asks before other shell commands, and blocks secrets and changes to the guard itself. See <a href="https://github.com/Matutozi/Consequence-OS/blob/main/docs/personal.md">ConsequenceOS on your own machine</a>.</p>
+
+  <h2>Anchored on Concordium</h2>
+  <p>A guarded agent can be registered in Concordium's Agent Registry, with an Agent Card that names its guard and its public keys. The audit log's head is anchored in the agent's record, where only its owner can write and anyone can read. If someone later cuts entries out of the log, the anchor no longer matches, and anyone can see it.</p>
+  <p class="note">The cards of agents registered from this project are hosted under <a href="/agents/">/agents/</a>. See <a href="https://github.com/Matutozi/Consequence-OS/blob/main/docs/concordium.md">Anchoring on Concordium</a>.</p>
+
+  <h2>What it doesn't do</h2>
+  <ul class="plain">
+    <li>It doesn't detect prompt injection or judge whether an instruction is good. It limits what any agent can do, however it was misled.</li>
+    <li>It covers calls made through MCP and through Claude Code's tools. An agent that calls APIs directly, around it, isn't covered.</li>
+    <li>The Claude Code hook is enforced by Claude Code, not the operating system. It isn't a sandbox.</li>
+  </ul>
+
+  <footer>
+    ConsequenceOS is built by <a href="https://emmanelsobowale.dev/">Emmanuel Sobowale</a> and licensed under Apache-2.0.
+    Source, docs and issues are on <a href="https://github.com/Matutozi/Consequence-OS">GitHub</a>.
+  </footer>
+</main>
+</body>
+</html>
