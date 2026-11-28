@@ -47,7 +47,7 @@ Your rules live in `~/.consequence/claude-code.yaml`. Rules are checked top to b
 
 Two commands help, in Claude Code:
 
-- **`/consequenceos:add-rule <what you want, in plain words>`** drafts a rule, checks it in a copy of your policy, and shows you where to paste it. For example: `/consequenceos:add-rule ask before editing anything in migrations/`.
+- **`/consequenceos:add-rule <what you want, in plain words>`** drafts a rule and a test for it, checks both against copies of your policy and its tests, and shows you where to paste each. For example: `/consequenceos:add-rule ask before editing anything in migrations/`.
 - **`/consequenceos:check`** lists your rules in the order they're checked, warns about risky ones, and runs the policy's tests.
 
 Claude can't open or change your policy: ConsequenceOS keeps it out of its own folder. The commands show Claude the rules through a check you approve, one shell command each, and you paste the rule in yourself. [ConsequenceOS on your own machine](../../docs/personal.md#changing-the-rules) has more examples, and [Guarding Claude Code](../../docs/claude-code.md) is the full reference.

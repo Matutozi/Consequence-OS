@@ -1,5 +1,5 @@
 ---
-description: Draft a ConsequenceOS rule from plain words, check it, and show where to paste it
+description: Draft a ConsequenceOS rule and its tests from plain words, check them, and show where to paste them
 argument-hint: <what the rule should do, in plain words>
 ---
 
@@ -26,14 +26,28 @@ Their policy is `~/.consequence/claude-code.yaml` (or the file `$CONSEQUENCEOS_P
    - **Time windows:** `during:` or `outside: { days: [mon, tue, wed, thu, fri], hours: "09:00-17:00", timezone: Africa/Lagos }`.
    - **Allow what you trust; don't deny what you fear.** To let a shell command through, allow that exact command and require `compound: false`, so `go test ./...; rm -rf ~` doesn't pass as `go test ./...`. A deny rule on a command's text is easy to get around (`git push -f` instead of `git push --force`); every command that no rule allows already asks.
 
-3. **Check it, with one shell command.** Run this with the Bash tool, with your rule between the `EOF` lines. It's the only command you need, so the person approves just once:
+3. **Write a test for each rule**: a call the rule should decide, and the decision it should get. The person's tests require one for every rule, so without them `/consequenceos:check` fails. Use the same paths as their existing tests, which use `/home/you/project` for the project:
+
+   ```yaml
+   - name: editing a migration asks
+     tool: Edit
+     args: { file_path: /home/you/project/db/migrations/001_init.sql, old_string: a, new_string: b }
+     want: ask
+     rule: ask-before-editing-migrations
+   ```
+
+   Where it helps, add one for a call the rule should *not* catch, with the decision it gets instead (`rule:` then names the rule that decides it).
+
+4. **Check them, with one shell command.** Run this with the Bash tool: your rules, a line `--- tests ---`, then your tests. It's the only command you need, so the person approves just once:
 
    ```
    bash "${CLAUDE_PLUGIN_ROOT}/bin/consequenceos" try <<'EOF'
    - name: ...
+   --- tests ---
+   - name: ...
    EOF
    ```
 
-   It puts the rule in the "Your rules" section of a copy of the policy, checks the copy, and prints every rule in the order they're checked; the policy itself isn't touched. Read that list: if an earlier rule already decides the calls yours is about, yours never runs, so say so. Fix whatever it reports, including warnings, and check again.
+   It puts the rules in the "Your rules" section of a copy of the policy, checks the copy, and prints every rule in the order they're checked. Then it adds the tests to a copy of the policy's tests and runs them all against that copy. Neither the policy nor its tests is touched. Read the rule list: if an earlier rule already decides the calls yours is about, yours never runs, so say so. Fix whatever fails, including warnings, and try again.
 
-4. **Show the person** the rule in a `yaml` code block. Say in one sentence what it does, and in one more how it could surprise them (what it lets through, or what it now asks about). Tell them to paste it on the line just above `# ---- End of your rules ----` in their policy, then run `/consequenceos:check`.
+5. **Show the person** two `yaml` code blocks: the rules, and the tests. Say in one sentence what the rules do, and in one more how they could surprise them (what they let through, or what they now ask about). Tell them to paste the rules on the line just above `# ---- End of your rules ----` in `~/.consequence/claude-code.yaml`, the tests at the end of `~/.consequence/claude-code.test.yaml`, then run `/consequenceos:check`.
