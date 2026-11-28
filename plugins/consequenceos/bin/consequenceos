@@ -33,7 +33,20 @@ REPO=https://github.com/Matutozi/Consequence-OS
 mode="${1:-hook}"
 self="${BASH_SOURCE[0]}"
 root="$(cd "$(dirname "$self")/.." && pwd)"
-data="${CLAUDE_PLUGIN_DATA:-$HOME/.consequence/plugin}"
+data="${CLAUDE_PLUGIN_DATA:-}"
+if [ -z "$data" ]; then
+  # Claude Code names the plugin's data folder only to its hooks. Run any
+  # other way (a slash command's shell, or by hand), the folder is found
+  # from where the plugin is installed: <config>/plugins/cache/<marketplace>/
+  # <plugin>/<version> keeps its data in <config>/plugins/data/<plugin>-<marketplace>.
+  case "$root" in
+    */plugins/cache/*/*/*)
+      plugin_dir="$(dirname "$root")"
+      data="${root%/plugins/cache/*}/plugins/data/$(basename "$plugin_dir")-$(basename "$(dirname "$plugin_dir")")"
+      ;;
+    *) data="$HOME/.consequence/plugin" ;;
+  esac
+fi
 policy="${CONSEQUENCEOS_POLICY:-$HOME/.consequence/claude-code.yaml}"
 lock="$data/.install.lock"   # held by the install that's running; holds its PID
 errors="$data/install.error" # why the last install failed
@@ -223,7 +236,12 @@ if [ "$mode" = install ]; then
 fi
 
 if [ "$mode" = check ] || [ "$mode" = try ]; then
-  [ -x "$bin" ] || fail "consequenced isn't installed yet; it's downloading in the background, so try again in a minute"
+  if [ ! -x "$bin" ]; then
+    if [ -d "$data/.install.lock" ]; then
+      fail "consequenced $VERSION is still downloading in the background; try again in a minute"
+    fi
+    fail "consequenced $VERSION isn't installed in $data. Start a new Claude Code session so the plugin installs it, or set CONSEQUENCEOS_BIN to a consequenced you installed"
+  fi
   [ -e "$policy" ] || fail "there's no policy at $policy yet"
 fi
 

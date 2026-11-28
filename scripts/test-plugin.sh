@@ -143,6 +143,22 @@ old_out="$(CONSEQUENCEOS_POLICY="$work/old-policy.yaml" bash "$launcher" try </d
 [ "$old_code" != 0 ] && [[ "$old_out" == *"End of your rules"* ]] && pass "try says what to do with a policy from before the 'Your rules' section" ||
   fail "try on an old policy: code $old_code, $old_out"
 
+# A slash command's shell isn't told where the plugin's data is, only
+# hooks are: check and try find it from where Claude Code installed the
+# plugin, <config>/plugins/cache/<marketplace>/<plugin>/<version>.
+cached="$work/cfg/plugins/cache/consequenceos/consequenceos/$version"
+mkdir -p "$(dirname "$cached")"
+cp -R "$plugin" "$cached"
+mkdir -p "$work/cfg/plugins/data"
+cp -R "$CLAUDE_PLUGIN_DATA" "$work/cfg/plugins/data/consequenceos-consequenceos"
+slash_out="$(env -u CLAUDE_PLUGIN_DATA bash "$cached/bin/consequenceos" check 2>&1)" && slash_code=0 || slash_code=$?
+[ "$slash_code" = 0 ] && [[ "$slash_out" == *"guard-the-guard"*"ok: "* ]] &&
+  pass "check finds consequenced outside a hook, from where the plugin is installed" || fail "check outside a hook: code $slash_code, $slash_out"
+rm -rf "$work/cfg/plugins/data/consequenceos-consequenceos"
+slash_out="$(env -u CLAUDE_PLUGIN_DATA bash "$cached/bin/consequenceos" try </dev/null 2>&1)" && slash_code=0 || slash_code=$?
+[ "$slash_code" != 0 ] && [[ "$slash_out" == *"isn't installed"*"new Claude Code session"* ]] &&
+  pass "and with nothing installed there, it says so rather than claiming a download" || fail "try with nothing installed: code $slash_code, $slash_out"
+
 # The policy is the user's from now on: a later run keeps it.
 echo "# mine" >>"$HOME/.consequence/claude-code.yaml"
 bash "$launcher" setup >/dev/null
