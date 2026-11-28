@@ -17,7 +17,7 @@ consequenced -init claude-code            # this project, in .claude/settings.lo
 consequenced -init claude-code -global    # every project, in ~/.claude/settings.json
 ```
 
-It writes the starter policy to `~/.consequence/claude-code.yaml`, unless one is there, and shows the hook entry before adding it. `-policy-only` writes the policy and leaves the settings alone; the plugin runs it the first time. `-config` puts the policy elsewhere; its state goes in a `state` folder beside it. `-yes` skips the question. Change the rules in that file, then check them with `consequenced -hook claude-code -check`. It prints the rules and warns about risky ones. The starter's source, with a comment on every rule, is [internal/hook/starter.yaml](../internal/hook/starter.yaml).
+It writes the starter policy to `~/.consequence/claude-code.yaml`, unless one is there, and shows the hook entry before adding it. `-policy-only` writes the policy and leaves the settings alone; the plugin runs it the first time. With `CLAUDE_CONFIG_DIR` set, the starter also keeps the agent out of that folder's settings and plugins. `-config` puts the policy elsewhere; its state goes in a `state` folder beside it. `-yes` skips the question. Change the rules in that file, then check them with `consequenced -hook claude-code -check`. It prints the rules and warns about risky ones. The starter's source, with a comment on every rule, is [internal/hook/starter.yaml](../internal/hook/starter.yaml).
 
 ### By hand
 

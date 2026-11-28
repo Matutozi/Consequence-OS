@@ -21,10 +21,10 @@ Then restart Claude Code. Linux and macOS only.
 
 ## What happens the first time
 
-1. The plugin downloads `consequenced`, the program that decides each call, from this repository's [releases](https://github.com/Matutozi/Consequence-OS/releases): about 9 MB, once. The download has to match a checksum that ships inside the plugin, or it isn't installed. On a slow connection it may take more than one try: each try carries on where the last stopped.
-2. It writes a starter policy to `~/.consequence/claude-code.yaml`, unless you have one. It never overwrites your rules.
+1. The plugin downloads `consequenced`, the program that decides each call, from this repository's [releases](https://github.com/Matutozi/Consequence-OS/releases): about 6 MB, once. The download runs in the background, so your session starts straight away, and Claude Code shows a note saying it's under way. The download has to match a checksum that ships inside the plugin, or it isn't installed. If it's cut off, the next try carries on where it stopped.
+2. It writes a starter policy to `~/.consequence/claude-code.yaml`, unless you have one. It never overwrites your rules. Once it has, Claude Code shows a note saying where the policy is and what it does.
 
-Until both are done, every tool call is blocked, with a message saying why. ConsequenceOS fails closed: if it can't decide a call, the call doesn't run.
+Until both are done, each tool call is blocked straight away, with a message saying ConsequenceOS is still installing. ConsequenceOS fails closed: if it can't decide a call, the call doesn't run. On a fast connection that's a few seconds; on a slow one, a couple of minutes. To wait for it in a terminal instead, run `bash ~/.claude/plugins/cache/consequenceos/consequenceos/*/bin/consequenceos install`.
 
 ## What the starter policy does
 
@@ -66,5 +66,6 @@ These environment variables, set where you start Claude Code, change what the pl
 ## Good to know
 
 - **Set up with `consequenced -init claude-code` before?** Remove that hook entry from `.claude/settings.local.json` or `~/.claude/settings.json`, or every call is checked twice. Your policy stays where it is, and the plugin uses it.
+- **Claude Code's config somewhere else?** With `CLAUDE_CONFIG_DIR` set, the starter policy also blocks changes to that folder's settings and plugins. A policy written before v0.7.0 doesn't have that: delete `~/.consequence/claude-code.yaml` (and `claude-code.test.yaml`) to get the new starter, or add the folder to the `guard-the-guard` rule yourself.
 - **It isn't a sandbox.** Claude Code runs the hook, not the operating system. It stops the calls Claude Code makes through its tools. See [what it doesn't cover](../../docs/claude-code.md#what-this-doesnt-cover).
 - **Uninstalling** with `/plugin uninstall consequenceos` removes the hook. Your policy and log stay in `~/.consequence`.

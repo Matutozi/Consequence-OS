@@ -20,7 +20,7 @@ func starterEnv(t *testing.T, consequenceDir string) env {
 	if err := os.MkdirAll(e.project, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteStarter(e.config, &strings.Builder{}); err != nil {
+	if err := WriteStarter(e.config, "", &strings.Builder{}); err != nil {
 		t.Fatal(err)
 	}
 	vars := map[string]string{"HOME": root, ProjectDirEnv: e.project}
@@ -232,5 +232,41 @@ func TestShellQuote(t *testing.T) {
 		if got := ShellQuote(in); got != want {
 			t.Errorf("ShellQuote(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// With Claude Code's config somewhere other than ~/.claude, as
+// CLAUDE_CONFIG_DIR=~/.claude-b puts it, the */.claude/ patterns miss its
+// settings and plugins, so the starter names that folder too.
+func TestStarterGuardsClaudeConfigDir(t *testing.T) {
+	root := t.TempDir()
+	claudeDir := filepath.Join(root, ".claude-b")
+	consequenceDir := filepath.Join(root, ".consequence")
+	e := env{project: filepath.Join(root, "project"), state: filepath.Join(consequenceDir, "state"), config: filepath.Join(consequenceDir, "claude-code.yaml")}
+	for _, d := range []string{e.project, filepath.Join(claudeDir, "plugins")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	vars := map[string]string{"HOME": root, ProjectDirEnv: e.project, "CLAUDE_CONFIG_DIR": "~/.claude-b"}
+	e.lookup = func(k string) (string, bool) { v, ok := vars[k]; return v, ok }
+	if got := ClaudeConfigDir(e.lookup); got != claudeDir {
+		t.Fatalf("ClaudeConfigDir = %q, want %q", got, claudeDir)
+	}
+	if err := WriteStarter(e.config, ClaudeConfigDir(e.lookup), &strings.Builder{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ tool, input string }{
+		{"Edit", `{"file_path":` + quote(filepath.Join(claudeDir, "plugins", "cache", "consequenceos", "hooks", "hooks.json")) + `,"old_string":"a","new_string":"b"}`},
+		{"Write", `{"file_path":` + quote(filepath.Join(claudeDir, "settings.json")) + `,"content":"{}"}`},
+	} {
+		r := e.run(t, e.call(c.tool, c.input))
+		if got, reason := r.decision(t); got != "deny" || !strings.Contains(reason, "guard-the-guard") {
+			t.Errorf("%s in %s: %q %q %s", c.tool, claudeDir, got, reason, r.stderr)
+		}
+	}
+	// Unset, nothing is added.
+	if got := ClaudeConfigDir(func(string) (string, bool) { return "", false }); got != "" {
+		t.Errorf("ClaudeConfigDir with nothing set = %q", got)
 	}
 }

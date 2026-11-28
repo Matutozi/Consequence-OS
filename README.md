@@ -701,7 +701,7 @@ git tag v0.1.0 && git push origin v0.1.0
 ```
 
 The [release workflow](.github/workflows/release.yml) runs the tests, then:
-- publishes a GitHub Release with binaries for Linux and macOS (amd64 and arm64) and `SHA256SUMS`;
+- publishes a GitHub Release with binaries for Linux and macOS (amd64 and arm64): for each, the full archive, and a third-the-size one with `consequenced` alone, which the Claude Code plugin downloads; and `SHA256SUMS`;
 - pushes the image to `ghcr.io/matutozi/consequence-os` as `0.1.0`, `0.1` and `latest`.
 
 A tag with a hyphen, like `v0.2.0-rc.1`, becomes a pre-release and doesn't move `latest`. `make dist` builds the same archives locally.

@@ -330,7 +330,7 @@ func runInit(name, configPath string, global, yes bool, out io.Writer) error {
 		return err
 	}
 	err = hook.Init(hook.InitOptions{
-		ConfigPath: configPath, SettingsPath: settings, Command: hook.Command(executable(), configPath),
+		ConfigPath: configPath, ClaudeDir: hook.ClaudeConfigDir(os.LookupEnv), SettingsPath: settings, Command: hook.Command(executable(), configPath),
 		Yes: yes, In: stdin, Out: out,
 	})
 	if err != nil {
@@ -369,7 +369,7 @@ func runInitPolicy(name, configPath string, global bool, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := hook.WriteStarter(configPath, out); err != nil {
+	if err := hook.WriteStarter(configPath, hook.ClaudeConfigDir(os.LookupEnv), out); err != nil {
 		return err
 	}
 	cfg, err := config.LoadLocal(configPath, os.LookupEnv)

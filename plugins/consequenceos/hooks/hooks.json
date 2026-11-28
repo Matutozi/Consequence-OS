@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/consequenceos\" setup",
-            "timeout": 300
+            "timeout": 30
           }
         ]
       }
@@ -19,7 +19,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/consequenceos\" hook",
-            "timeout": 120,
+            "timeout": 30,
             "onFailure": "block"
           }
         ]
