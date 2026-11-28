@@ -1,7 +1,7 @@
 {
   "name": "consequenceos",
   "displayName": "ConsequenceOS",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "A policy on every file edit, shell command and MCP call Claude Code makes: allow, ask or block, with secrets out of reach and a tamper-evident log of what the agent did. Runs on your machine, with no server.",
   "author": {
     "name": "Matutozi",
