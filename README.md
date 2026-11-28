@@ -738,7 +738,7 @@ This is an early MVP. Built:
 - consequence scores, with rules that match on them and the score in the audit log and on the approval page;
 - receipt v1, which names its receiver and carries the call's consequence;
 - a file store, which keeps state on one machine across restarts with no database;
-- a Claude Code hook, which applies the policy to Claude Code's built-in tools;
+- a Claude Code hook, which applies the policy to Claude Code's built-in tools, and a Claude Code plugin that installs it in one command;
 - pinned tool definitions: a changed tool is hidden from the model and asks until accepted, and arguments its schema doesn't name are refused;
 - signing key rotation, with old keys kept for saved audit heads, and offline receivers that pick up new keys by themselves;
 - archiving old audit entries to a file that can be checked on its own, without breaking the chain;
