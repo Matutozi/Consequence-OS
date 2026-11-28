@@ -119,25 +119,41 @@ check_out="$(bash "$launcher" check 2>&1)" && [[ "$check_out" == *"guard-the-gua
   pass "check lists the rules and runs their tests" || fail "check: $check_out"
 
 # try checks a rule in a copy of the policy, in the "Your rules" section,
-# and leaves the policy as it was.
-before="$(sha256 "$pol")"
-try_out="$(bash "$launcher" try 2>&1 <<'EOF'
-- name: tests
+# runs the policy's tests with the rule's own added, and leaves both files
+# as they were.
+tests_file="$HOME/.consequence/claude-code.test.yaml"
+before="$(sha256 "$pol")$(sha256 "$tests_file")"
+rule='- name: tests
   tool: Bash
   when:
     - { arg: command, op: like, value: ["go test ./..."] }
     - { arg: compound, op: eq, value: false }
-  action: allow
-EOF
-)" && try_code=0 || try_code=$?
-if [ "$try_code" = 0 ] && [[ "$try_out" == *"tests: Bash -> allow"* ]] && [ "$(sha256 "$pol")" = "$before" ] &&
+  action: allow'
+try_out="$(printf '%s\n--- tests ---\n%s\n' "$rule" '- name: the tests run without asking
+  tool: Bash
+  args: { command: "go test ./..." }
+  want: allow
+  rule: tests' | bash "$launcher" try 2>&1)" && try_code=0 || try_code=$?
+if [ "$try_code" = 0 ] && [[ "$try_out" == *"tests: Bash -> allow"*"the tests run without asking: allow by tests"*"ok: "* ]] &&
+  [ "$(sha256 "$pol")$(sha256 "$tests_file")" = "$before" ] &&
   [ "$(grep -n -m1 'tests: Bash' <<<"$try_out" | cut -d: -f1)" -lt "$(grep -n -m1 ' edits-in-the-project' <<<"$try_out" | cut -d: -f1)" ]; then
-  pass "try checks a rule in the 'Your rules' place, before the defaults, and leaves the policy alone"
+  pass "try checks a rule in the 'Your rules' place and runs its tests with the rest, leaving both files alone"
 else
   fail "try: code $try_code, $try_out"
 fi
+# Tests that don't hold fail, and so does a rule with none, since the
+# starter's tests require one for every rule.
+wrong_out="$(printf '%s\n--- tests ---\n%s\n' "$rule" '- name: wrongly expected to ask
+  tool: Bash
+  args: { command: "go test ./..." }
+  want: ask
+  rule: tests' | bash "$launcher" try 2>&1)" && wrong_code=0 || wrong_code=$?
+[ "$wrong_code" != 0 ] && [[ "$wrong_out" == *FAIL* ]] && pass "try fails a test that doesn't hold" || fail "try with a wrong test: code $wrong_code, $wrong_out"
+none_out="$(printf '%s\n' "$rule" | bash "$launcher" try 2>&1)" && none_code=0 || none_code=$?
+[ "$none_code" != 0 ] && [[ "$none_out" == *"--- tests ---"* ]] && pass "try asks for tests when the policy's tests need one for every rule" ||
+  fail "try with no tests: code $none_code, $none_out"
 bad_out="$(printf -- '- name: oops\n  tool: Bash\n  when: { arg: command, op: resembles, value: x }\n  action: allow\n' | bash "$launcher" try 2>&1)" && bad_code=0 || bad_code=$?
-[ "$bad_code" != 0 ] && [ "$(sha256 "$pol")" = "$before" ] && pass "try refuses a rule that doesn't check" || fail "try with a bad rule: code $bad_code, $bad_out"
+[ "$bad_code" != 0 ] && [ "$(sha256 "$pol")$(sha256 "$tests_file")" = "$before" ] && pass "try refuses a rule that doesn't check" || fail "try with a bad rule: code $bad_code, before=$before now=$(sha256 "$pol")$(sha256 "$tests_file")"
 grep -v -- '---- End of your rules ----' "$pol" >"$work/old-policy.yaml"
 old_out="$(CONSEQUENCEOS_POLICY="$work/old-policy.yaml" bash "$launcher" try </dev/null 2>&1)" && old_code=0 || old_code=$?
 [ "$old_code" != 0 ] && [[ "$old_out" == *"End of your rules"* ]] && pass "try says what to do with a policy from before the 'Your rules' section" ||

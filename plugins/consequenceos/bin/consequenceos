@@ -255,25 +255,50 @@ fi
 
 # try puts the rules on stdin where the person would paste them, just
 # above the "End of your rules" line, in a copy of the policy, and checks
-# that copy. Rules written at the left margin are indented to fit.
+# that copy. After a line "--- tests ---", stdin may carry test cases for
+# the rules: they're added to a copy of the policy's tests, which then run
+# against the copy of the policy, so a new rule and its tests are known to
+# pass before anything is pasted. Entries written at the left margin are
+# indented to fit. Neither the policy nor its tests is changed.
 if [ "$mode" = try ]; then
   end="  # ---- End of your rules ----"
   grep -qxF "$end" "$policy" ||
     fail "$policy has no '# ---- End of your rules ----' line (policies written before v0.7.0 don't). Put the rule above the first rule it should come before, then run check"
   mkdir -p "$data" || fail "can't create $data"
-  rules="$(mktemp "$data/try-rules.XXXXXX")" && copy="$(mktemp "$data/try-policy.XXXXXX")" ||
-    fail "can't create a file in $data"
-  trap 'rm -f "$rules" "$copy"' EXIT
-  cat >"$rules"
-  first="$(sed -n '/[^[:space:]]/{p;q;}' "$rules")"
-  [ -n "$first" ] || fail "give the rules to try on stdin"
-  case "$first" in
-    -*) sed -i.bak 's/^/  /' "$rules" && rm -f "$rules.bak" ;;
-  esac
-  awk -v end="$end" -v f="$rules" '$0 == end { while ((getline line < f) > 0) print line } { print }' "$policy" >"$copy"
+  scratch="$(mktemp -d "$data/try.XXXXXX")" || fail "can't create a folder in $data"
+  trap 'rm -rf "$scratch"' EXIT
+  cat >"$scratch/input"
+  awk '/^--- tests ---[[:space:]]*$/ { exit } { print }' "$scratch/input" >"$scratch/rules"
+  awk 'found { print } /^--- tests ---[[:space:]]*$/ { found = 1 }' "$scratch/input" >"$scratch/cases"
+  # indent FILE: entries written at the left margin are indented two spaces.
+  indent() {
+    case "$(sed -n '/[^[:space:]]/{p;q;}' "$1")" in
+      -*) sed -i.bak 's/^/  /' "$1" && rm -f "$1.bak" ;;
+    esac
+  }
+  grep -q '[^[:space:]]' "$scratch/rules" || fail "give the rules to try on stdin"
+  indent "$scratch/rules"
+  awk -v end="$end" -v f="$scratch/rules" '$0 == end { while ((getline line < f) > 0) print line } { print }' \
+    "$policy" >"$scratch/policy.yaml"
   echo "Your policy with these rules added, as it would be checked:"
-  "$bin" -hook claude-code -check -config "$copy"
-  exit $?
+  "$bin" -hook claude-code -check -config "$scratch/policy.yaml" || exit 1
+
+  tests="${policy%.*}.test.yaml"
+  if grep -q '[^[:space:]]' "$scratch/cases"; then
+    [ -f "$tests" ] || fail "there are no tests at $tests to add these to"
+    indent "$scratch/cases"
+    { sed 's|^config:.*|config: policy.yaml|' "$tests" && echo && cat "$scratch/cases"; } >"$scratch/policy.test.yaml"
+    echo
+    echo "Your policy's tests, with these added, against that policy:"
+    "$bin" -test "$scratch/policy.test.yaml"
+    exit $?
+  fi
+  if [ -f "$tests" ] && grep -q '^require_every_rule: *true' "$tests"; then
+    echo
+    echo "No tests were given. Your tests require one for every rule, so add a test case for each new rule after a line '--- tests ---', and try again."
+    exit 1
+  fi
+  exit 0
 fi
 
 # Not installed yet: start installing in the background, if nothing is, and
