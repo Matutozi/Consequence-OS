@@ -1,0 +1,29 @@
+{
+  "description": "ConsequenceOS: a policy on every tool call Claude Code makes",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/consequenceos\" setup",
+            "timeout": 300
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/consequenceos\" hook",
+            "timeout": 120,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -2,6 +2,18 @@
 
 You don't need a team, a server or a database to use ConsequenceOS. If you use Claude Code on your own repositories, it can check every file edit and shell command before it runs, keep secrets out of reach, and keep a tamper-evident log of what your agent did. Nothing leaves your machine.
 
+## One minute: the plugin
+
+In Claude Code:
+
+```
+/plugin install consequenceos --marketplace Matutozi/Consequence-OS
+```
+
+Restart Claude Code. The first time, the plugin downloads `consequenced` (checked against a checksum it ships with) and writes the starter policy below to `~/.consequence/claude-code.yaml`. It touches no settings file: the plugin brings the hook. See [the plugin's README](../plugins/consequenceos/README.md).
+
+To set it up by hand instead, for one project or without the plugin, follow the five minutes below.
+
 ## Five minutes
 
 **1. Install** `consequenced` on your `PATH`, from a [release](https://github.com/Matutozi/Consequence-OS/releases) or with `go install github.com/matutozi/consequence-os/cmd/consequenced@latest`. Linux and macOS only.
@@ -33,7 +45,7 @@ To try it without touching your own setup first, run `./scripts/demo-personal.sh
 | Run `git status`, `git diff`, `git log`, `git show`, `ls`, `pwd` | Goes ahead, if it's only that command |
 | Run any other command, or anything with `;`, `&&`, `\|`, `$(…)` or a redirect | Asks you |
 | Read or write `.env` files, SSH keys, cloud credentials | Blocked, and Claude is told why |
-| Change Claude Code's settings, or ConsequenceOS's own policy and log | Blocked |
+| Change Claude Code's settings or plugins, or ConsequenceOS's own policy and log | Blocked |
 | Use an MCP tool you haven't listed | Asks you |
 | An MCP server wrapped with `-stdio` asks you for a password, key or seed phrase | Blocked: the server is told you declined |
 

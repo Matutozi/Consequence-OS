@@ -36,7 +36,7 @@ Any action an agent takes through an MCP tool, and anything it reads through MCP
 
 All of these, written out, are in [examples/policies.yaml](examples/policies.yaml). The quickstart below uses refunds only because they're easy to picture.
 
-It can also guard **Claude Code's own tools**, such as file edits and shell commands, which don't go through MCP. It runs as a hook on your machine, with no server and no database. Set it up with `consequenced -init claude-code`. See [ConsequenceOS on your own machine](docs/personal.md).
+It can also guard **Claude Code's own tools**, such as file edits and shell commands, which don't go through MCP. It runs as a hook on your machine, with no server and no database. Install it as a Claude Code plugin with `/plugin install consequenceos --marketplace Matutozi/Consequence-OS`, or set it up with `consequenced -init claude-code`. See [ConsequenceOS on your own machine](docs/personal.md).
 
 ## Guides
 

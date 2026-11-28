@@ -379,6 +379,54 @@ func TestHookVerifyAudit(t *testing.T) {
 	}
 }
 
+// The plugin brings its own hook, so -policy-only writes the policy and
+// touches no settings file. Run again, it keeps the policy there.
+func TestInitPolicyOnly(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	path := filepath.Join(root, "dot-consequence", "claude-code.yaml")
+	stdin, stderr = strings.NewReader(""), &bytes.Buffer{}
+	t.Cleanup(func() { stdin, stderr = os.Stdin, os.Stderr })
+
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-init", "claude-code", "-policy-only", "-config", path}, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Wrote the starter policy to " + path, "config OK for the Claude Code hook"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+	for _, settings := range []string{filepath.Join(project, ".claude"), filepath.Join(root, "home", ".claude")} {
+		if _, err := os.Stat(settings); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s was touched: %v", settings, err)
+		}
+	}
+
+	if err := os.WriteFile(path, []byte("state_dir: "+filepath.Join(root, "state")+"\nlocal_agent: { id: me, owner_id: me }\nrules: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run(context.Background(), []string{"-init", "claude-code", "-policy-only", "-config", path}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Keeping your policy at "+path) {
+		t.Errorf("output:\n%s", out.String())
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "rules: []") {
+		t.Errorf("the policy was overwritten:\n%s", b)
+	}
+
+	if err := run(context.Background(), []string{"-init", "claude-code", "-policy-only", "-global", "-config", path}, &out); err == nil {
+		t.Error("-policy-only with -global: want an error")
+	}
+}
+
 func TestInitAndLog(t *testing.T) {
 	root := t.TempDir()
 	project := filepath.Join(root, "project")

@@ -61,7 +61,7 @@ type InitOptions struct {
 // were. Saying no is not an error: nothing is written.
 func Init(opts InitOptions) error {
 	out := opts.Out
-	if err := writeStarter(opts.ConfigPath, out); err != nil {
+	if err := WriteStarter(opts.ConfigPath, out); err != nil {
 		return err
 	}
 
@@ -93,8 +93,9 @@ func Init(opts InitOptions) error {
 	return nil
 }
 
-// writeStarter writes the starter policy, unless one is there already.
-func writeStarter(path string, out io.Writer) error {
+// WriteStarter writes the starter policy, and its tests beside it, unless
+// a policy is there already.
+func WriteStarter(path string, out io.Writer) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err

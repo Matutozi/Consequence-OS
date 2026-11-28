@@ -20,7 +20,7 @@ func starterEnv(t *testing.T, consequenceDir string) env {
 	if err := os.MkdirAll(e.project, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeStarter(e.config, &strings.Builder{}); err != nil {
+	if err := WriteStarter(e.config, &strings.Builder{}); err != nil {
 		t.Fatal(err)
 	}
 	vars := map[string]string{"HOME": root, ProjectDirEnv: e.project}

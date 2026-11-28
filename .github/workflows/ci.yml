@@ -1,7 +1,7 @@
 # Runs on every push to main and every pull request: formatting, go vet,
 # all Go tests with the race detector (Postgres store tests included, and
-# consequence-anchor's, which is its own module), the Python middleware's
-# tests, and a Docker build so the quickstart image can't break unnoticed.
+# consequence-anchor's, which is its own module), the Claude Code plugin's
+# launcher, the Python middleware's tests, and a Docker build so the quickstart image can't break unnoticed.
 name: CI
 
 on:
@@ -42,6 +42,8 @@ jobs:
       - name: consequence-anchor tests (its own module)
         working-directory: cmd/consequence-anchor
         run: go test -race -count=1 ./...
+      - name: Claude Code plugin
+        run: scripts/test-plugin.sh
 
   # The FastAPI/Starlette receiver middleware, on the oldest and newest
   # supported Pythons.

@@ -123,6 +123,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	initName := fs.String("init", "", "set up the hook for this agent (claude-code): write a starter policy and add the hook to its settings")
 	global := fs.Bool("global", false, "with -init: add the hook to ~/.claude/settings.json, for every project, instead of this project's .claude/settings.local.json")
 	yes := fs.Bool("yes", false, "with -init: change the settings without asking")
+	policyOnly := fs.Bool("policy-only", false, "with -init: write the starter policy only, and leave Claude Code's settings alone; for the Claude Code plugin, which brings its own hook")
 	stdioMode := fs.Bool("stdio", false, "wrap a local MCP server: start the command after --, and check every call to it")
 	approveID := fs.String("approve", "", "approve a held call by its ID (apr_...), asking you on the terminal first")
 	reject := fs.Bool("reject", false, "with -approve: reject the call instead")
@@ -148,6 +149,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		*configPath = filepath.Join(home, ".consequence", "claude-code.yaml")
 	}
 	if *initName != "" {
+		if *policyOnly {
+			return runInitPolicy(*initName, *configPath, *global, out)
+		}
 		return runInit(*initName, *configPath, *global, *yes, out)
 	}
 	if *archiveAudit != "" || (*verifyAudit && *archiveFile != "") {
@@ -349,6 +353,31 @@ func runInit(name, configPath string, global, yes bool, out io.Writer) error {
 		"  - See its decisions:        consequenced -hook claude-code -log%[1]s\n"+
 		"  - Change the rules in %[2]s, then check them: consequenced -hook claude-code -check%[1]s\n", flagConfig, configPath)
 	return nil
+}
+
+// runInitPolicy writes the starter policy, unless there is one, and checks
+// it loads. The Claude Code plugin runs it before its first call: the
+// plugin brings the hook, so no settings file is touched.
+func runInitPolicy(name, configPath string, global bool, out io.Writer) error {
+	if name != "claude-code" {
+		return fmt.Errorf("-init %q: the only hook is claude-code", name)
+	}
+	if global {
+		return errors.New("-policy-only touches no settings, so -global has nothing to do: use one or the other")
+	}
+	configPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return err
+	}
+	if err := hook.WriteStarter(configPath, out); err != nil {
+		return err
+	}
+	cfg, err := config.LoadLocal(configPath, os.LookupEnv)
+	if err != nil {
+		return fmt.Errorf("the policy at %s doesn't load: %w", configPath, err)
+	}
+	fmt.Fprintln(out)
+	return printHookSummary(out, cfg)
 }
 
 // runStdio wraps the MCP server command, checking every call to it.
