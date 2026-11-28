@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ConsequenceOS</title>
+<meta name="description" content="Put rules between your AI agent and the tools it calls. Small things go through, risky things wait for a person, and your service can check every call was allowed.">
+<meta property="og:title" content="ConsequenceOS">
+<meta property="og:description" content="Put rules between your AI agent and the tools it calls.">
+<meta property="og:url" content="https://consequenceos.emmanelsobowale.dev/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext x='1' y='13' font-family='monospace' font-size='13'%3E%E2%9C%93%3C/text%3E%3C/svg%3E">
+<style>
+  body {
+    max-width: 660px; margin: 0 auto; padding: 40px 20px 80px;
+    font: 18px/1.6 Charter, "Bitstream Charter", Georgia, serif;
+    color: #222; background: #fffefb;
+  }
+  a { color: #0645ad; }
+  a:visited { color: #5a3e9a; }
+  h1 { font-size: 1.6em; margin: 0 0 4px; }
+  h2 { font-size: 1.15em; margin: 40px 0 8px; }
+  p, ol, ul { margin: 0 0 14px; }
+  li { margin-bottom: 6px; }
+  .nav { font-size: 0.9em; color: #666; margin-bottom: 32px; }
+  pre, code { font: 14px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  pre { background: #f4f2ec; padding: 12px 14px; overflow-x: auto; margin: 0 0 16px; }
+  code { background: #f4f2ec; padding: 0 3px; }
+  pre code { background: none; padding: 0; }
+  .small { font-size: 0.88em; color: #555; }
+  hr { border: 0; border-top: 1px solid #ddd; margin: 48px 0 16px; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #ddd; background: #161616; }
+    a { color: #8ab4f8; } a:visited { color: #c58af9; }
+    pre, code { background: #232323; }
+    .nav, .small { color: #999; }
+    hr { border-top-color: #333; }
+  }
+</style>
+</head>
+<body>
+
+<h1>ConsequenceOS</h1>
+<div class="nav">
+  <a href="https://github.com/Matutozi/Consequence-OS">source</a> ·
+  <a href="https://github.com/Matutozi/Consequence-OS#guides">docs</a> ·
+  <a href="https://github.com/Matutozi/Consequence-OS/releases">download</a>
+</div>
+
+<p>If you let an AI agent issue refunds, edit code or touch a database, you need to decide what it may do on its own and what needs a person first. ConsequenceOS lets you write that down as rules, and enforces them on every call the agent makes.</p>
+
+<p>Small things go through. Risky things wait for someone to approve them. Anything you've ruled out is refused. And every call that goes through carries a signed receipt, so the system on the other end can check it was really allowed.</p>
+
+<h2>How you use it</h2>
+
+<p><b>1. Write your rules.</b> For example, an agent that handles customer refunds:</p>
+
+<pre>
+rules:
+  - name: small-refunds
+    tool: payments.refund
+    when: { arg: amount, op: lte, value: 50 }
+    action: allow
+
+  - name: everything-else-asks
+    tool: payments.refund
+    action: ask
+</pre>
+
+<p><b>2. Put ConsequenceOS in front of your tools.</b> Your agent connects to ConsequenceOS instead of your tool server, and ConsequenceOS passes on the calls your rules allow. The agent never holds the tool server's credentials, so it can't go around it.</p>
+
+<p><b>3. Let the agent work.</b></p>
+
+<ul>
+  <li>It refunds $20: the call goes straight through.</li>
+  <li>It tries to refund $5,000: the call is held, and an approver gets an email. Once they approve, that exact refund goes through, once.</li>
+  <li>Every decision is written to an audit log that shows if anyone edits it.</li>
+</ul>
+
+<p><b>4. Optional: have your service check receipts.</b> Add the receipt check to your API (there's middleware for Go and Python), and it will refuse any call that didn't come through ConsequenceOS.</p>
+
+<p>The <a href="https://github.com/Matutozi/Consequence-OS#quickstart-a-held-5000-refund-in-under-10-minutes">quickstart</a> runs this refund example on your machine with Docker in about ten minutes.</p>
+
+<h2>Or try it on Claude Code</h2>
+
+<p>The same rules can guard a coding agent. Install the plugin in Claude Code:</p>
+
+<pre>/plugin install consequenceos --marketplace Matutozi/Consequence-OS</pre>
+
+<p>From then on, Claude can read files and edit your project freely, asks you before running shell commands, and can't touch your <code>.env</code> files, SSH keys, or the guard itself. You change any of that by editing the rules. See <a href="https://github.com/Matutozi/Consequence-OS/blob/main/docs/personal.md">ConsequenceOS on your own machine</a>.</p>
+
+<h2>Good to know</h2>
+
+<ul>
+  <li>It doesn't try to detect prompt injection. It limits what an agent can do, however it was misled.</li>
+  <li>It works with tools reached through MCP, and with Claude Code's own tools. Linux and macOS.</li>
+  <li>It's early, open source, and built by one person. If something breaks, please <a href="https://github.com/Matutozi/Consequence-OS/issues">open an issue</a>.</li>
+</ul>
+
+<hr>
+<p class="small">By <a href="https://emmanelsobowale.dev/">Emmanuel Sobowale</a> · Apache-2.0 · <a href="/agents/">agent cards</a></p>
+
+</body>
+</html>
